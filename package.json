@@ -1,0 +1,20 @@
+{
+  "name": "racing-discord-bot",
+  "version": "1.0.0",
+  "description": "Discord bot for analyzing racing screenshots and sending notifications",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node bot.js"
+  },
+  "engines": {
+    "node": "18.x"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.3.1",
+    "openai": "^4.20.1",
+    "moment-timezone": "^0.5.43",
+    "axios": "^1.6.2"
+  }
+}
