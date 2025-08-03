@@ -62,65 +62,90 @@ Return the information in a structured format.`
                     ]
                 }
             ],
-            max_tokens: 500
+            max_tokens: 1000
         });
 
         const analysis = response.choices[0].message.content;
-        console.log('🤖 AI Analysis:', analysis);
-
-        // Extract race times and calculate Melbourne time
-        const raceInfo = parseRaceInformation(analysis);
+        console.log('🔍 AI Analysis:', analysis);
         
+        // Parse race information using AI
+        const raceInfo = await parseRaceInformation(analysis);
+        
+        // Add races to notification system if any found
+        if (raceInfo && raceInfo.races && raceInfo.races.length > 0) {
+            addRacesToNotifications(raceInfo);
+        }
+
         return {
             isRacing: true,
             analysis: analysis,
             raceInfo: raceInfo,
-            melbourneTime: moment().tz('Australia/Melbourne').format('YYYY-MM-DD HH:mm:ss [AEDT/AEST]')
+            enhanced: true
         };
 
     } catch (error) {
-        console.error('❌ AI Analysis error:', error.message);
-        
-        // Fallback to simple analysis
+        console.error('❌ AI analysis failed:', error);
         return await fallbackAnalysis(imageUrl);
     }
 }
 
-// Function to check for upcoming races and send notifications
-async function checkUpcomingRaces() {
-    const currentTime = moment().tz('Australia/Melbourne');
-    const notificationChannel = client.channels.cache.get('1401527867447443456');
-    
-    if (!notificationChannel) {
-        console.log('❌ Notification channel not found');
-        return;
-    }
-    
-    // Check each upcoming race
-    for (const race of upcomingRaces) {
-        const raceTime = moment(race.raceTime);
-        const minutesUntilRace = raceTime.diff(currentTime, 'minutes');
-        const raceKey = `${race.race}-${race.raceTime}`;
+// Function to parse race information and normalize using AI
+async function parseRaceInformation(aiAnalysis) {
+    try {
+        console.log('🧠 Using AI to normalize race information...');
         
-        // Send notification when race is 5 minutes away (and we haven't already notified)
-        if (minutesUntilRace <= 5 && minutesUntilRace > 0 && !notificationsSent.has(raceKey)) {
-            console.log(`🚨 Sending 5-minute notification for ${race.race}`);
-            
-            await notificationChannel.send({
-                content: `@everyone 🏇 **Race Alert!**\n\n🚨 **${race.race} starts in ${minutesUntilRace} minutes!**\n\n⏰ **Start Time:** ${raceTime.format('HH:mm:ss')} Melbourne Time\n🏁 **Race:** ${race.raceName || 'Race details'}\n\nGet ready! 🎯`
-            });
-            
-            notificationsSent.add(raceKey);
+        // Use AI to parse the AI analysis into our standardized format
+        const normalizeResponse = await openai.chat.completions.create({
+            model: "gpt-4o",
+            messages: [
+                {
+                    role: "system",
+                    content: `You are a race data parser. Convert racing analysis into a standardized JSON format. 
+                    
+                    Return ONLY valid JSON with this exact structure:
+                    {
+                        "races": [
+                            {
+                                "race": "R1",
+                                "time": "14:30",
+                                "countdownMinutes": 25
+                            }
+                        ]
+                    }
+                    
+                    Rules:
+                    - race: Use format like "R1", "R2", etc. or track name
+                    - time: 24-hour format HH:MM
+                    - countdownMinutes: numeric minutes until race starts
+                    - Only include races that are upcoming (not completed)
+                    - If no valid races found, return {"races": []}`
+                },
+                {
+                    role: "user",
+                    content: `Parse this racing analysis into the standardized format:\n\n${aiAnalysis}`
+                }
+            ],
+            max_tokens: 1000,
+            temperature: 0.1
+        });
+
+        let normalizedData = normalizeResponse.choices[0].message.content.trim();
+        
+        // Clean up markdown code fences if present
+        if (normalizedData.startsWith('```json')) {
+            normalizedData = normalizedData.replace(/```json\s*/, '').replace(/\s*```$/, '');
+        } else if (normalizedData.startsWith('```')) {
+            normalizedData = normalizedData.replace(/```\s*/, '').replace(/\s*```$/, '');
         }
         
-        // Clean up old races (more than 10 minutes past)
-        if (minutesUntilRace < -10) {
-            const index = upcomingRaces.indexOf(race);
-            if (index > -1) {
-                upcomingRaces.splice(index, 1);
-                notificationsSent.delete(raceKey);
-            }
-        }
+        const parsed = JSON.parse(normalizedData);
+        console.log('✅ AI parsing successful:', parsed);
+        return parsed;
+        
+    } catch (error) {
+        console.error('❌ AI parsing failed:', error);
+        // Fallback to simple parsing
+        return { races: [] };
     }
 }
 
@@ -128,7 +153,10 @@ async function checkUpcomingRaces() {
 function addRacesToNotifications(raceInfo) {
     const currentTime = moment().tz('Australia/Melbourne');
     
-    raceInfo.raceTimes.forEach(race => {
+    // Handle both old (raceTimes) and new (races) format for compatibility
+    const races = raceInfo.races || raceInfo.raceTimes || [];
+    
+    races.forEach(race => {
         const raceTime = moment().tz('Australia/Melbourne');
         
         // Parse the race time
@@ -153,7 +181,7 @@ function addRacesToNotifications(raceInfo) {
                 upcomingRaces.push({
                     race: race.race,
                     raceTime: raceTime.toISOString(),
-                    raceName: race.original || 'Unknown Race',
+                    raceName: race.original || race.time || 'Unknown Race',
                     addedAt: currentTime.toISOString()
                 });
                 
@@ -173,118 +201,64 @@ async function fallbackAnalysis(imageUrl) {
         isRacing: true,
         analysis: 'Racing content detected! AI analysis unavailable - add your OpenAI API key for advanced features.',
         raceInfo: {
-            raceTimes: [],
-            countdown: 'Unable to determine without AI',
+            races: [],
             currentMelbourneTime: moment().tz('Australia/Melbourne').format('YYYY-MM-DD HH:mm:ss [AEDT/AEST]')
         }
     };
 }
 
-// Parse race information and calculate times
-function parseRaceInformation(analysis) {
-    const raceTimes = [];
+// Function to check for upcoming races and send notifications
+async function checkUpcomingRaces() {
     const currentTime = moment().tz('Australia/Melbourne');
-    let match;
+    const notificationChannel = process.env.NOTIFICATION_CHANNEL_ID;
     
-    // Enhanced regex patterns for different countdown formats
-    const countdownMinutesRegex = /R(\d+)[\s\S]*?Countdown:\s*(\d+)m/gi;
-    const countdownSecondsRegex = /R(\d+)[\s\S]*?Countdown:\s*(\d+)s/gi;
-    const scheduledInMinutesRegex = /R(\d+):\s*Scheduled in (\d+) minutes?/gi;
-    const raceTimeRegex = /R(\d+)[\s\S]*?Time:\s*(\d{1,2}):(\d{2})/gi;
-    
-    // Extract countdown in minutes (R2: Countdown: 30m)
-    while ((match = countdownMinutesRegex.exec(analysis)) !== null) {
-        const raceNumber = match[1];
-        const minutesFromNow = parseInt(match[2]);
-        const raceTime = moment(currentTime).add(minutesFromNow, 'minutes');
-        
-        raceTimes.push({
-            race: `R${raceNumber}`,
-            original: `${minutesFromNow} minutes countdown`,
-            time: raceTime.format('HH:mm'),
-            melbourneTime: raceTime.format('YYYY-MM-DD HH:mm [AEDT/AEST]'),
-            timeUntilRace: minutesFromNow,
-            countdownMinutes: minutesFromNow
-        });
+    if (!notificationChannel) {
+        console.log('⚠️ No notification channel configured');
+        return;
     }
     
-    // Extract countdown in seconds (R1: Countdown: 58s)
-    while ((match = countdownSecondsRegex.exec(analysis)) !== null) {
-        const raceNumber = match[1];
-        const secondsFromNow = parseInt(match[2]);
-        const minutesFromNow = Math.ceil(secondsFromNow / 60); // Convert to minutes for display
-        const raceTime = moment(currentTime).add(secondsFromNow, 'seconds');
-        
-        raceTimes.push({
-            race: `R${raceNumber}`,
-            original: `${secondsFromNow} seconds countdown`,
-            time: raceTime.format('HH:mm:ss'),
-            melbourneTime: raceTime.format('YYYY-MM-DD HH:mm:ss [AEDT/AEST]'),
-            timeUntilRace: minutesFromNow,
-            countdownSeconds: secondsFromNow
-        });
-    }
-    
-    // Extract "Scheduled in X minutes" format
-    while ((match = scheduledInMinutesRegex.exec(analysis)) !== null) {
-        const raceNumber = match[1];
-        const minutesFromNow = parseInt(match[2]);
-        const raceTime = moment(currentTime).add(minutesFromNow, 'minutes');
-        
-        raceTimes.push({
-            race: `R${raceNumber}`,
-            original: `Scheduled in ${minutesFromNow} minutes`,
-            time: raceTime.format('HH:mm'),
-            melbourneTime: raceTime.format('YYYY-MM-DD HH:mm [AEDT/AEST]'),
-            timeUntilRace: minutesFromNow,
-            countdownMinutes: minutesFromNow
-        });
-    }
-    
-    // Extract race times (R1: Time: 13:50)
-    while ((match = raceTimeRegex.exec(analysis)) !== null) {
-        const raceNumber = match[1];
-        const hour = parseInt(match[2]);
-        const minute = parseInt(match[3]);
-        
-        const raceTime = moment().tz('Australia/Melbourne').hour(hour).minute(minute).second(0);
-        
-        // If the race time is in the past, add a day
-        if (raceTime.isBefore(currentTime)) {
-            raceTime.add(1, 'day');
+    try {
+        const channel = await client.channels.fetch(notificationChannel);
+        if (!channel) {
+            console.log('❌ Notification channel not found');
+            return;
         }
         
-        // Only add if not already added by countdown patterns
-        const alreadyExists = raceTimes.some(rt => rt.race === `R${raceNumber}`);
-        if (!alreadyExists) {
-            raceTimes.push({
-                race: `R${raceNumber}`,
-                original: `${hour}:${minute.toString().padStart(2, '0')}`,
-                time: raceTime.format('HH:mm'),
-                melbourneTime: raceTime.format('YYYY-MM-DD HH:mm [AEDT/AEST]'),
-                timeUntilRace: raceTime.diff(currentTime, 'minutes')
-            });
+        // Check each race
+        for (let i = upcomingRaces.length - 1; i >= 0; i--) {
+            const race = upcomingRaces[i];
+            const raceTime = moment(race.raceTime);
+            const minutesUntilRace = raceTime.diff(currentTime, 'minutes');
+            const notificationKey = `${race.race}-${raceTime.toISOString()}`;
+            
+            // Remove races that have already started (give 10 minutes buffer)
+            if (minutesUntilRace < -10) {
+                console.log(`🗑️ Removing expired race: ${race.race}`);
+                upcomingRaces.splice(i, 1);
+                notificationsSent.delete(notificationKey);
+                continue;
+            }
+            
+            // Send notification 5 minutes before race
+            if (minutesUntilRace <= 5 && minutesUntilRace > 0 && !notificationsSent.has(notificationKey)) {
+                const message = `🔔 @everyone **RACE ALERT!**\n\n🏇 **${race.race}** starts in **${minutesUntilRace} minutes**!\n⏰ Race time: ${raceTime.format('HH:mm')} Melbourne time\n\n🎯 Get ready to place your bets!`;
+                
+                await channel.send(message);
+                notificationsSent.add(notificationKey);
+                console.log(`🔔 Sent notification for ${race.race} (${minutesUntilRace} minutes remaining)`);
+            }
         }
+        
+    } catch (error) {
+        console.error('❌ Error checking upcoming races:', error);
     }
-    
-    // Sort by race number
-    raceTimes.sort((a, b) => {
-        const aNum = parseInt(a.race.replace('R', ''));
-        const bNum = parseInt(b.race.replace('R', ''));
-        return aNum - bNum;
-    });
-    
-    return {
-        raceTimes: raceTimes,
-        currentMelbourneTime: currentTime.format('YYYY-MM-DD HH:mm:ss [AEDT/AEST]')
-    };
 }
 
 // Bot ready event
 client.once('ready', () => {
     console.log(`✅ Bot is ready! Logged in as ${client.user.tag}`);
     console.log(`🕐 Current Melbourne time: ${moment().tz('Australia/Melbourne').format('YYYY-MM-DD HH:mm:ss [AEDT/AEST]')}`);
-    console.log(`🔔 Notification system active - monitoring channel: 1401527867447443456`);
+    console.log(`🔔 Notification system active - monitoring channel: ${process.env.NOTIFICATION_CHANNEL_ID}`);
     
     // Set up race notification checker (every 30 seconds)
     setInterval(checkUpcomingRaces, 30000);
@@ -305,8 +279,41 @@ client.on('messageCreate', async (message) => {
         const hasOpenAI = openai.apiKey && openai.apiKey !== 'demo-key';
         
         await message.reply({
-            content: `🤖 **Enhanced Racing Bot with AI Analysis & Notifications**\n\n📸 **Upload racing screenshots** and I'll analyze them!\n🏇 **I can detect:**\n• Race times and countdowns\n• Horse names and odds\n• Time until races start\n• Convert times to Melbourne timezone\n\n� **Notification System:**\n• Automatically monitors race times\n• Sends @everyone alerts 5 minutes before races\n• Works across channels for maximum coverage\n\n�🕐 **Current Melbourne Time:** ${melbourneTime}\n\n🤖 **AI Status:** ${hasOpenAI ? '✅ OpenAI Enabled' : '❌ Add OpenAI API key for advanced analysis'}\n\n*Just upload an image and I'll analyze it AND set up notifications!*`
+            content: `🤖 **Enhanced Racing Bot with AI Analysis & Notifications**\n\n📸 **Upload racing screenshots** and I'll analyze them!\n🏇 **I can detect:**\n• Race times and countdowns\n• Horse names and odds\n• Time until races start\n• Convert times to Melbourne timezone\n\n🔔 **Notification System:**\n• Automatically monitors race times\n• Sends @everyone alerts 5 minutes before races\n• Works across channels for maximum coverage\n\n🕐 **Current Melbourne Time:** ${melbourneTime}\n\n🤖 **AI Status:** ${hasOpenAI ? '✅ OpenAI Enabled' : '❌ Add OpenAI API key for advanced analysis'}\n\n**Commands:**\n• \`!clear\` - Remove all race notifications\n• \`!status\` - Show active notifications\n\n*Just upload an image and I'll analyze it AND set up notifications!*`
         });
+        return;
+    }
+    
+    // Handle !clear command to delete all notifications
+    if (message.content.toLowerCase() === '!clear') {
+        const clearedCount = upcomingRaces.length;
+        upcomingRaces.length = 0; // Clear the array
+        notificationsSent.clear(); // Clear sent notifications set
+        
+        await message.reply(`🗑️ **Cleared ${clearedCount} race notifications!**\n\n✅ All upcoming race alerts have been removed.\n🔄 Upload a new racing screenshot to set up fresh notifications.`);
+        console.log(`🗑️ Cleared ${clearedCount} notifications via !clear command`);
+        return;
+    }
+    
+    // Handle !status command to show current notifications
+    if (message.content.toLowerCase() === '!status') {
+        if (upcomingRaces.length === 0) {
+            await message.reply(`📊 **No active race notifications**\n\n📸 Upload a racing screenshot to set up notifications!`);
+        } else {
+            let statusText = `📊 **Active Race Notifications (${upcomingRaces.length}):**\n\n`;
+            
+            upcomingRaces.forEach((race, index) => {
+                const raceTime = moment(race.raceTime);
+                const minutesUntil = raceTime.diff(moment().tz('Australia/Melbourne'), 'minutes');
+                const alertTime = moment(race.raceTime).subtract(5, 'minutes');
+                
+                statusText += `🏇 **${race.race}** - ${raceTime.format('HH:mm')}\n`;
+                statusText += `   ⏰ Alert in ${Math.max(0, minutesUntil - 5)} minutes (${alertTime.format('HH:mm')})\n\n`;
+            });
+            
+            statusText += `🔄 Use \`!clear\` to remove all notifications`;
+            await message.reply(statusText);
+        }
         return;
     }
     
@@ -321,10 +328,6 @@ client.on('messageCreate', async (message) => {
         if (!attachment.contentType?.startsWith('image/')) continue;
         
         try {
-            // React to show we're processing
-            await message.react('🤖');
-            
-            // Analyze image with AI
             const result = await analyzeRacingImageWithAI(attachment.url);
             
             console.log('📝 Analysis result:', result);
@@ -334,13 +337,15 @@ client.on('messageCreate', async (message) => {
                 let responseText = `🏇 **Racing Screenshot Analyzed!**\n\n`;
                 responseText += `🤖 **Analysis:**\n\`\`\`\n${result.analysis.substring(0, 400)}...\n\`\`\`\n\n`;
                 
-                if (result.raceInfo && result.raceInfo.raceTimes.length > 0) {
+                if (result.raceInfo && (result.raceInfo.races || result.raceInfo.raceTimes)) {
                     // Add races to notification system
                     addRacesToNotifications(result.raceInfo);
                     
                     responseText += `⏰ **Race Times (Melbourne):**\n`;
-                    result.raceInfo.raceTimes.forEach(race => {
-                        const timeLeft = race.timeUntilRace > 0 ? `${race.timeUntilRace} minutes` : 'Started';
+                    const races = result.raceInfo.races || result.raceInfo.raceTimes || [];
+                    races.forEach(race => {
+                        const timeLeft = race.timeUntilRace || race.countdownMinutes || 0;
+                        const timeDisplay = timeLeft > 0 ? `${timeLeft} minutes` : 'Started';
                         const raceLabel = race.race ? `${race.race}: ` : '';
                         
                         let countdownInfo = '';
@@ -350,25 +355,26 @@ client.on('messageCreate', async (message) => {
                             countdownInfo = ` (${race.countdownMinutes}m countdown)`;
                         }
                         
-                        responseText += `• ${raceLabel}${race.time} → ${race.melbourneTime} (${timeLeft})${countdownInfo}\n`;
+                        const raceTime = race.time || 'Unknown time';
+                        const melbourneTime = race.melbourneTime || 'Melbourne time';
+                        responseText += `• ${raceLabel}${raceTime} → ${melbourneTime} (${timeDisplay})${countdownInfo}\n`;
                     });
-                    responseText += `\n`;
+                    
+                    responseText += `\n🔔 **Notifications set up!** I'll alert @ everyone 5 minutes before each race in <#${process.env.NOTIFICATION_CHANNEL_ID}>`;
+                } else {
+                    responseText += `⚠️ No upcoming races detected in this image.`;
                 }
                 
-                responseText += `🕐 **Current Melbourne Time:** ${result.raceInfo?.currentMelbourneTime || moment().tz('Australia/Melbourne').format('YYYY-MM-DD HH:mm:ss [AEDT/AEST]')}`;
+                responseText += `\n\n⏰ **Current Melbourne Time:** ${moment().tz('Australia/Melbourne').format('YYYY-MM-DD HH:mm:ss [AEDT/AEST]')}`;
                 
-                await message.reply({ content: responseText });
-                await message.react('🏇');
-                console.log('✅ AI racing analysis sent!');
+                await message.reply(responseText);
             } else {
-                await message.react('❌');
-                console.log('❌ No racing content detected');
+                await message.reply('❌ This doesn\'t appear to be a racing-related image. Please upload a screenshot from bet365 or another racing website.');
             }
             
         } catch (error) {
-            console.error('❌ Error analyzing image:', error);
-            await message.react('⚠️');
-            await message.reply(`❌ Error analyzing image: ${error.message}`);
+            console.error('❌ Error processing image:', error);
+            await message.reply('❌ Sorry, I encountered an error processing that image. Please try again with a clear racing screenshot.');
         }
     }
 });
