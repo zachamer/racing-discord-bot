@@ -10,6 +10,10 @@ const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY
 });
 
+// Initialize BetsAPI
+const BETSAPI_TOKEN = process.env.BETSAPI_TOKEN;
+const ODDS_CHANNEL_ID = '1401917437921722398'; // Channel for odds drop alerts
+
 // Create Discord client
 const client = new Client({
     intents: [
@@ -22,6 +26,17 @@ const client = new Client({
 // Store upcoming races for notifications
 let upcomingRaces = [];
 let notificationsSent = new Set(); // Track which races we've already notified about
+
+// Store odds tracking data
+let trackedRaces = new Map(); // Map of race IDs to race data
+let oddsHistory = new Map(); // Map of race IDs to odds history
+let oddsAlertsChannelSent = new Set(); // Track odds alerts sent
+
+// Japanese horse racing tracks to monitor
+const JAPANESE_TRACKS = [
+    'Mizusawa', 'Kanazawa', 'Kawasaki', 'Tokyo Keiba', 
+    'Sonoda', 'Nagoya', 'Kochi', 'Saga'
+];
 
 // Advanced function to analyze racing screenshot with AI
 async function analyzeRacingImageWithAI(imageUrl) {
@@ -268,6 +283,243 @@ async function fallbackAnalysis(imageUrl) {
     };
 }
 
+// ==================== BETSAPI ODDS TRACKING SYSTEM ====================
+
+// Function to get upcoming horse racing events from BetsAPI
+async function getUpcomingHorseRaces() {
+    if (!BETSAPI_TOKEN) {
+        console.log('⚠️ BetsAPI token not configured - skipping odds tracking');
+        return [];
+    }
+
+    try {
+        console.log('🔍 Fetching upcoming horse races from BetsAPI...');
+        
+        // Horse Racing is typically sport_id 2 in BetsAPI
+        const response = await axios.get('https://api.b365api.com/v1/bet365/upcoming', {
+            params: {
+                sport_id: 2, // Horse Racing
+                token: BETSAPI_TOKEN
+            },
+            timeout: 10000
+        });
+
+        if (response.data && response.data.results) {
+            const allRaces = response.data.results;
+            
+            // Filter for Japanese tracks
+            const japaneseRaces = allRaces.filter(race => {
+                const raceName = race.league?.name || race.home?.name || '';
+                return JAPANESE_TRACKS.some(track => 
+                    raceName.toLowerCase().includes(track.toLowerCase())
+                );
+            });
+
+            console.log(`🏇 Found ${japaneseRaces.length} Japanese horse races`);
+            return japaneseRaces;
+        }
+
+        return [];
+    } catch (error) {
+        console.error('❌ Error fetching horse races from BetsAPI:', error.message);
+        return [];
+    }
+}
+
+// Function to get detailed odds for a specific race
+async function getRaceOdds(raceId) {
+    if (!BETSAPI_TOKEN) return null;
+
+    try {
+        const response = await axios.get('https://api.b365api.com/v1/bet365/event', {
+            params: {
+                FI: raceId,
+                token: BETSAPI_TOKEN
+            },
+            timeout: 10000
+        });
+
+        if (response.data && response.data.results) {
+            return response.data.results;
+        }
+
+        return null;
+    } catch (error) {
+        console.error(`❌ Error fetching odds for race ${raceId}:`, error.message);
+        return null;
+    }
+}
+
+// Function to detect significant odds drops
+function detectOddsDrops(raceId, currentOdds, previousOdds) {
+    const drops = [];
+    
+    if (!previousOdds || !currentOdds) return drops;
+
+    // Compare each horse's odds
+    Object.keys(currentOdds).forEach(horseName => {
+        const currentOdd = parseFloat(currentOdds[horseName]);
+        const previousOdd = parseFloat(previousOdds[horseName]);
+
+        if (previousOdd && currentOdd && previousOdd > currentOdd) {
+            const dropPercentage = ((previousOdd - currentOdd) / previousOdd) * 100;
+            
+            if (dropPercentage >= 20) {
+                drops.push({
+                    horseName: horseName,
+                    previousOdds: previousOdd,
+                    currentOdds: currentOdd,
+                    dropPercentage: Math.round(dropPercentage * 10) / 10,
+                    raceId: raceId
+                });
+            }
+        }
+    });
+
+    return drops;
+}
+
+// Function to process and store race odds
+async function updateRaceOdds(race) {
+    const raceId = race.id;
+    const currentTime = moment().tz('Australia/Melbourne');
+    const raceTime = moment.unix(race.time);
+    const minutesUntilRace = raceTime.diff(currentTime, 'minutes');
+
+    // Only track races that are 1-5 minutes away
+    if (minutesUntilRace < 1 || minutesUntilRace > 5) {
+        return;
+    }
+
+    console.log(`📊 Updating odds for race ${raceId} (${minutesUntilRace}m until start)`);
+
+    const oddsData = await getRaceOdds(raceId);
+    if (!oddsData) return;
+
+    // Extract horse odds from the API response
+    const currentOdds = {};
+    if (oddsData.odds && Array.isArray(oddsData.odds)) {
+        oddsData.odds.forEach(market => {
+            if (market.type === 'win' || market.type === 'place') {
+                market.values?.forEach(horse => {
+                    if (horse.odds) {
+                        currentOdds[horse.name] = horse.odds;
+                    }
+                });
+            }
+        });
+    }
+
+    // Get previous odds for comparison
+    const raceHistory = oddsHistory.get(raceId) || [];
+    const previousOdds = raceHistory.length > 0 ? raceHistory[raceHistory.length - 1].odds : null;
+
+    // Detect odds drops
+    if (previousOdds && minutesUntilRace <= 3) {
+        const drops = detectOddsDrops(raceId, currentOdds, previousOdds);
+        
+        if (drops.length > 0) {
+            await sendOddsDropAlert(race, drops);
+        }
+    }
+
+    // Store current odds in history
+    raceHistory.push({
+        timestamp: currentTime.toISOString(),
+        odds: currentOdds,
+        minutesUntilRace: minutesUntilRace
+    });
+
+    // Keep only last 10 entries
+    if (raceHistory.length > 10) {
+        raceHistory.shift();
+    }
+
+    oddsHistory.set(raceId, raceHistory);
+}
+
+// Function to send odds drop alerts
+async function sendOddsDropAlert(race, drops) {
+    try {
+        const channel = await client.channels.fetch(ODDS_CHANNEL_ID);
+        if (!channel) {
+            console.log('❌ Odds alert channel not found');
+            return;
+        }
+
+        const raceTime = moment.unix(race.time);
+        const minutesUntil = raceTime.diff(moment().tz('Australia/Melbourne'), 'minutes');
+        const raceName = race.league?.name || race.home?.name || 'Unknown Race';
+
+        let alertMessage = `🚨 **ODDS DROP ALERT!** 🚨\n\n`;
+        alertMessage += `🏇 **Race**: ${raceName}\n`;
+        alertMessage += `⏰ **Time**: ${raceTime.format('HH:mm')} (${minutesUntil}m away)\n\n`;
+        alertMessage += `📉 **Significant Odds Drops (20%+):**\n`;
+
+        drops.forEach(drop => {
+            alertMessage += `• **${drop.horseName}**: ${drop.previousOdds} → ${drop.currentOdds} (${drop.dropPercentage}% drop)\n`;
+        });
+
+        alertMessage += `\n🎯 These horses have significant market movement!`;
+
+        // Create unique key to prevent duplicate alerts
+        const alertKey = `${race.id}-${drops.map(d => d.horseName).join('-')}`;
+        
+        if (!oddsAlertsChannelSent.has(alertKey)) {
+            await channel.send(alertMessage);
+            oddsAlertsChannelSent.add(alertKey);
+            console.log(`🔔 Sent odds drop alert for ${drops.length} horses in race ${race.id}`);
+        }
+
+    } catch (error) {
+        console.error('❌ Error sending odds drop alert:', error);
+    }
+}
+
+// Function to monitor all tracked races for odds changes
+async function monitorOddsChanges() {
+    if (!BETSAPI_TOKEN) return;
+
+    console.log('📊 Monitoring odds changes...');
+    
+    try {
+        const upcomingRaces = await getUpcomingHorseRaces();
+        
+        // Process each race
+        for (const race of upcomingRaces) {
+            const raceTime = moment.unix(race.time);
+            const minutesUntil = raceTime.diff(moment().tz('Australia/Melbourne'), 'minutes');
+            
+            // Only monitor races 1-5 minutes away
+            if (minutesUntil >= 1 && minutesUntil <= 5) {
+                await updateRaceOdds(race);
+                
+                // Small delay between API calls to avoid rate limiting
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+        }
+
+        // Clean up old odds history (races more than 1 hour old)
+        const oneHourAgo = moment().subtract(1, 'hour');
+        for (const [raceId, history] of oddsHistory.entries()) {
+            const lastUpdate = moment(history[history.length - 1]?.timestamp);
+            if (lastUpdate.isBefore(oneHourAgo)) {
+                oddsHistory.delete(raceId);
+                console.log(`🗑️ Cleaned up old odds data for race ${raceId}`);
+            }
+        }
+
+        // Clean up old alert tracking
+        if (oddsAlertsChannelSent.size > 1000) {
+            oddsAlertsChannelSent.clear();
+            console.log('🗑️ Cleared old odds alerts tracking');
+        }
+
+    } catch (error) {
+        console.error('❌ Error monitoring odds changes:', error);
+    }
+}
+
 // Function to check for upcoming races and send notifications
 async function checkUpcomingRaces() {
     const currentTime = moment().tz('Australia/Melbourne');
@@ -325,10 +577,20 @@ client.once('ready', () => {
     console.log(`✅ Bot is ready! Logged in as ${client.user.tag}`);
     console.log(`🕐 Current Melbourne time: ${moment().tz('Australia/Melbourne').format('YYYY-MM-DD HH:mm:ss [AEDT/AEST]')}`);
     console.log(`🔔 Notification system active - monitoring channel: ${process.env.NOTIFICATION_CHANNEL_ID}`);
+    console.log(`📊 Odds tracking active - monitoring channel: ${ODDS_CHANNEL_ID}`);
     
     // Set up race notification checker (every 30 seconds)
     setInterval(checkUpcomingRaces, 30000);
     console.log(`⏰ Race notification checker started (every 30 seconds)`);
+    
+    // Set up odds monitoring (every 30 seconds)
+    if (BETSAPI_TOKEN) {
+        setInterval(monitorOddsChanges, 30000);
+        console.log(`📈 Odds monitoring started (every 30 seconds) for Japanese tracks`);
+        console.log(`🏇 Tracking: ${JAPANESE_TRACKS.join(', ')}`);
+    } else {
+        console.log(`⚠️ BetsAPI token not configured - odds tracking disabled`);
+    }
 });
 
 // Listen for messages with images
@@ -345,7 +607,7 @@ client.on('messageCreate', async (message) => {
         const hasOpenAI = openai.apiKey && openai.apiKey !== 'demo-key';
         
         await message.reply({
-            content: `🤖 **Enhanced Racing Bot with AI Analysis & Notifications**\n\n📸 **Upload racing screenshots** and I'll analyze them!\n🏇 **I can detect:**\n• Race times and countdowns\n• Horse names and odds\n• Time until races start\n• Convert times to Melbourne timezone\n\n🔔 **Notification System:**\n• Automatically monitors race times\n• Sends @everyone alerts 5 minutes before races\n• Works across channels for maximum coverage\n\n🕐 **Current Melbourne Time:** ${melbourneTime}\n\n🤖 **AI Status:** ${hasOpenAI ? '✅ OpenAI Enabled' : '❌ Add OpenAI API key for advanced analysis'}\n\n**Commands:**\n• \`!clear\` - Remove all race notifications\n• \`!status\` - Show active notifications\n\n*Just upload an image and I'll analyze it AND set up notifications!*`
+            content: `🤖 **Enhanced Racing Bot with AI Analysis & Notifications**\n\n📸 **Upload racing screenshots** and I'll analyze them!\n🏇 **I can detect:**\n• Race times and countdowns\n• Horse names and odds\n• Time until races start\n• Convert times to Melbourne timezone\n\n🔔 **Notification System:**\n• Automatically monitors race times\n• Sends @everyone alerts 5 minutes before races\n• Works across channels for maximum coverage\n\n� **Odds Tracking System:**\n• Monitors Japanese horse racing tracks\n• Detects 20%+ odds drops from 3min to 20sec before races\n• Tracks: Mizusawa, Kanazawa, Kawasaki, Tokyo Keiba, Sonoda, Nagoya, Kochi, Saga\n• Alerts sent to <#${ODDS_CHANNEL_ID}>\n\n�🕐 **Current Melbourne Time:** ${melbourneTime}\n\n🤖 **AI Status:** ${hasOpenAI ? '✅ OpenAI Enabled' : '❌ Add OpenAI API key for advanced analysis'}\n📊 **BetsAPI Status:** ${BETSAPI_TOKEN ? '✅ Enabled' : '❌ Add BETSAPI_TOKEN for odds tracking'}\n\n**Commands:**\n• \`!clear\` - Remove all race notifications\n• \`!status\` - Show active notifications\n• \`!odds\` - Show odds tracking status\n\n*Just upload an image and I'll analyze it AND set up notifications!*`
         });
         return;
     }
@@ -390,6 +652,41 @@ client.on('messageCreate', async (message) => {
             statusText += `🔄 Use \`!clear\` to remove all notifications`;
             await message.reply(statusText);
         }
+        return;
+    }
+    
+    // Handle !odds command to show odds tracking status
+    if (message.content.toLowerCase() === '!odds') {
+        let oddsText = `📈 **Odds Tracking Status**\n\n`;
+        
+        if (!BETSAPI_TOKEN) {
+            oddsText += `❌ **BetsAPI not configured**\nAdd BETSAPI_TOKEN to .env file to enable odds tracking`;
+        } else {
+            oddsText += `✅ **BetsAPI Active**\n`;
+            oddsText += `🏇 **Monitoring Tracks**: ${JAPANESE_TRACKS.join(', ')}\n`;
+            oddsText += `📊 **Alert Channel**: <#${ODDS_CHANNEL_ID}>\n`;
+            oddsText += `⚡ **Detection**: 20%+ odds drops from 3min to 20sec before race\n\n`;
+            
+            const trackedCount = oddsHistory.size;
+            oddsText += `📊 **Currently Tracking**: ${trackedCount} races\n`;
+            
+            if (trackedCount > 0) {
+                oddsText += `\n**Active Races:**\n`;
+                let count = 0;
+                for (const [raceId, history] of oddsHistory.entries()) {
+                    if (count >= 5) break; // Show max 5 races
+                    const lastEntry = history[history.length - 1];
+                    const horseCount = Object.keys(lastEntry.odds).length;
+                    oddsText += `• Race ${raceId}: ${horseCount} horses (${lastEntry.minutesUntilRace}m away)\n`;
+                    count++;
+                }
+                if (trackedCount > 5) {
+                    oddsText += `• ... and ${trackedCount - 5} more races\n`;
+                }
+            }
+        }
+        
+        await message.reply(oddsText);
         return;
     }
     
