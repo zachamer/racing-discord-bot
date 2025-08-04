@@ -43,15 +43,20 @@ async function analyzeRacingImageWithAI(imageUrl) {
                         {
                             type: "text",
                             text: `Analyze this racing screenshot and extract:
-1. Race times (look for times like 3:30 PM, 15:30, etc.)
-2. Race names or track information
+1. Race times (look for times like 3:30 PM, 15:30, etc.) - CONVERT ALL TIMES TO MELBOURNE TIMEZONE
+2. SPECIFIC race names or track information (e.g. "Maiden Handicap", "Group 1 Stakes", "Listed Stakes", "Class 2 Handicap", track names like "Flemington", "Randwick", etc.)
 3. Horse names and odds
-4. Any countdown timers or "time to race" information
-5. Current time shown in the image
+4. Any countdown timers or "time to race" information - CALCULATE FROM MELBOURNE CURRENT TIME
+5. Current time shown in the image - NOTE THE TIMEZONE
+6. Look for race class/grade information (Class 1, Class 2, Group races, etc.)
+7. Look for race conditions (Maiden, Handicap, Allowance, etc.)
 
-Focus on identifying when races are scheduled and calculate time remaining. 
-If you see bet365 or other betting site interfaces, extract all visible race information.
-Return the information in a structured format.`
+IMPORTANT: Always calculate race times and countdowns relative to Melbourne timezone (AEDT/AEST).
+If the screenshot shows a different timezone, convert everything to Melbourne time.
+Focus on identifying when races are scheduled and calculate time remaining from current Melbourne time.
+Look closely for specific race titles, conditions, or track names that identify each race uniquely.
+If you see bet365 or other betting site interfaces, extract all visible race information including specific race names.
+Return the information in a structured format with as much detail as possible about each race's name/type.`
                         },
                         {
                             type: "image_url",
@@ -108,15 +113,20 @@ async function parseRaceInformation(aiAnalysis) {
                             {
                                 "race": "R1",
                                 "time": "14:30",
-                                "countdownMinutes": 25
+                                "countdownMinutes": 25,
+                                "raceName": "Specific race name here"
                             }
                         ]
                     }
                     
                     Rules:
                     - race: Use format like "R1", "R2", etc. or track name
-                    - time: 24-hour format HH:MM
-                    - countdownMinutes: numeric minutes until race starts
+                    - time: 24-hour format HH:MM (will be interpreted as Melbourne time)
+                    - countdownMinutes: numeric minutes until race starts FROM CURRENT MELBOURNE TIME
+                    - raceName: Extract the ACTUAL race name from the screenshot (e.g. "Maiden Handicap", "Group 1 Cox Plate", "Class 2 Sprint", "Allowance Race", track names like "Flemington R1", etc.). Do NOT use generic names like "Race 1" unless no specific name is visible.
+                    - Look for race conditions like Maiden, Handicap, Group races, Class numbers, Stakes races
+                    - If no specific race name is visible, use distance + race type (e.g. "1400m Maiden", "900m Sprint")
+                    - Calculate countdownMinutes based on Melbourne timezone (AEDT/AEST)
                     - Only include races that are upcoming (not completed)
                     - If no valid races found, return {"races": []}`
                 },
@@ -157,38 +167,89 @@ function addRacesToNotifications(raceInfo) {
     const races = raceInfo.races || raceInfo.raceTimes || [];
     
     races.forEach(race => {
+        // Always start with current Melbourne time for calculations
         const raceTime = moment().tz('Australia/Melbourne');
         
-        // Parse the race time
+        // Parse the race time based on available data
         if (race.countdownSeconds) {
             raceTime.add(race.countdownSeconds, 'seconds');
         } else if (race.countdownMinutes) {
             raceTime.add(race.countdownMinutes, 'minutes');
         } else if (race.timeUntilRace > 0) {
             raceTime.add(race.timeUntilRace, 'minutes');
+        } else if (race.time) {
+            // If we have a specific time (e.g., "14:30"), set it for today in Melbourne timezone
+            const [hours, minutes] = race.time.split(':').map(Number);
+            raceTime.set({ hour: hours, minute: minutes, second: 0, millisecond: 0 });
+            
+            // If the race time has already passed today, assume it's tomorrow
+            if (raceTime.isBefore(currentTime)) {
+                raceTime.add(1, 'day');
+            }
         } else {
-            return; // Skip races that have already started
+            console.log(`⚠️ Skipping race ${race.race} - no valid time information`);
+            return; // Skip races that have no time information
         }
         
+        console.log(`🕐 Race ${race.race} calculated time: ${raceTime.format('YYYY-MM-DD HH:mm:ss [Melbourne Time]')}`);
+        
         // Only add races that are within the next 24 hours
-        if (raceTime.diff(currentTime, 'hours') <= 24) {
+        if (raceTime.diff(currentTime, 'hours') <= 24 && raceTime.isAfter(currentTime)) {
             const raceKey = `${race.race}-${raceTime.toISOString()}`;
             
-            // Check if this race is already in our list
-            const existingRace = upcomingRaces.find(r => r.race === race.race && Math.abs(moment(r.raceTime).diff(raceTime, 'minutes')) < 2);
+            // Enhanced duplicate detection - check multiple criteria
+            const existingRace = upcomingRaces.find(r => {
+                const timeDiff = Math.abs(moment(r.raceTime).diff(raceTime, 'minutes'));
+                return (
+                    // Same race identifier and very close time (within 2 minutes)
+                    (r.race === race.race && timeDiff < 2) ||
+                    // Same exact race key
+                    `${r.race}-${r.raceTime}` === raceKey ||
+                    // Same race name and close time (for races with proper names)
+                    (r.raceName && race.raceName && 
+                     r.raceName === race.raceName && 
+                     r.raceName !== 'Unknown Race' && 
+                     timeDiff < 5)
+                );
+            });
             
             if (!existingRace) {
                 upcomingRaces.push({
                     race: race.race,
                     raceTime: raceTime.toISOString(),
-                    raceName: race.original || race.time || 'Unknown Race',
+                    raceName: race.raceName || race.original || race.time || 'Unknown Race',
                     addedAt: currentTime.toISOString()
                 });
                 
                 console.log(`📅 Added ${race.race} to notifications: ${raceTime.format('HH:mm:ss')} Melbourne Time`);
+            } else {
+                console.log(`🔄 Skipped duplicate race: ${race.race} at ${raceTime.format('HH:mm:ss')}`);
             }
         }
     });
+    
+    // Clean up any potential duplicates that might have slipped through
+    const uniqueRaces = [];
+    upcomingRaces.forEach(race => {
+        const isDuplicate = uniqueRaces.some(existing => {
+            const timeDiff = Math.abs(moment(existing.raceTime).diff(moment(race.raceTime), 'minutes'));
+            return (
+                (existing.race === race.race && timeDiff < 2) ||
+                (existing.raceName && race.raceName && 
+                 existing.raceName === race.raceName && 
+                 existing.raceName !== 'Unknown Race' && 
+                 timeDiff < 5)
+            );
+        });
+        
+        if (!isDuplicate) {
+            uniqueRaces.push(race);
+        } else {
+            console.log(`🗑️ Removed duplicate during cleanup: ${race.race}`);
+        }
+    });
+    
+    upcomingRaces = uniqueRaces;
     
     console.log(`📊 Total races being monitored: ${upcomingRaces.length}`);
 }
@@ -241,7 +302,12 @@ async function checkUpcomingRaces() {
             
             // Send notification 5 minutes before race
             if (minutesUntilRace <= 5 && minutesUntilRace > 0 && !notificationsSent.has(notificationKey)) {
-                const message = `🔔 @everyone **RACE ALERT!**\n\n🏇 **${race.race}** starts in **${minutesUntilRace} minutes**!\n⏰ Race time: ${raceTime.format('HH:mm')} Melbourne time\n\n🎯 Get ready to place your bets!`;
+                // Include race name if available
+                const raceDisplay = race.raceName && race.raceName !== 'Unknown Race' && race.raceName !== race.race 
+                    ? `**${race.race}** (${race.raceName})` 
+                    : `**${race.race}**`;
+                
+                const message = `🔔 @everyone **RACE ALERT!**\n\n🏇 ${raceDisplay} starts in **${minutesUntilRace} minutes**!\n⏰ Race time: ${raceTime.format('HH:mm')} Melbourne time\n\n🎯 Get ready to place your bets!`;
                 
                 await channel.send(message);
                 notificationsSent.add(notificationKey);
@@ -317,10 +383,16 @@ client.on('messageCreate', async (message) => {
         return;
     }
     
-    // Check if message has attachments
+    // Check if message has attachments and is from the correct channel
     if (message.attachments.size === 0) return;
     
-    console.log('📸 Image detected, analyzing with AI...');
+    // Only analyze images from the specific racing screenshots channel
+    if (message.channel.id !== '1401539500345131048') {
+        console.log(`📸 Image detected but ignoring - wrong channel: ${message.channel.id}`);
+        return;
+    }
+    
+    console.log('📸 Image detected in racing channel, analyzing with AI...');
     
     // Process each attachment
     for (const attachment of message.attachments.values()) {
