@@ -31,6 +31,7 @@ let notificationsSent = new Set(); // Track which races we've already notified a
 let trackedRaces = new Map(); // Map of race IDs to race data
 let oddsHistory = new Map(); // Map of race IDs to odds history
 let oddsAlertsChannelSent = new Set(); // Track odds alerts sent
+let twoMinuteOdds = new Map(); // Store odds captured at 2 minutes before race
 
 // Japanese horse racing tracks to monitor
 const JAPANESE_TRACKS = [
@@ -350,25 +351,25 @@ async function getRaceOdds(raceId) {
     }
 }
 
-// Function to detect significant odds drops
-function detectOddsDrops(raceId, currentOdds, previousOdds) {
+// Function to detect significant odds drops between 2-minute and 10-second marks
+function detectPreciseOddsDrops(raceId, currentOdds, twoMinuteOddsData) {
     const drops = [];
     
-    if (!previousOdds || !currentOdds) return drops;
+    if (!twoMinuteOddsData || !currentOdds) return drops;
 
-    // Compare each horse's odds
+    // Compare each horse's odds from 2-minute mark to current (10-second mark)
     Object.keys(currentOdds).forEach(horseName => {
         const currentOdd = parseFloat(currentOdds[horseName]);
-        const previousOdd = parseFloat(previousOdds[horseName]);
+        const twoMinuteOdd = parseFloat(twoMinuteOddsData[horseName]);
 
-        if (previousOdd && currentOdd && previousOdd > currentOdd) {
-            const dropPercentage = ((previousOdd - currentOdd) / previousOdd) * 100;
+        if (twoMinuteOdd && currentOdd && twoMinuteOdd > currentOdd) {
+            const dropPercentage = ((twoMinuteOdd - currentOdd) / twoMinuteOdd) * 100;
             
             if (dropPercentage >= 20) {
                 drops.push({
                     horseName: horseName,
-                    previousOdds: previousOdd,
-                    currentOdds: currentOdd,
+                    twoMinuteOdds: twoMinuteOdd,
+                    tenSecondOdds: currentOdd,
                     dropPercentage: Math.round(dropPercentage * 10) / 10,
                     raceId: raceId
                 });
@@ -379,19 +380,20 @@ function detectOddsDrops(raceId, currentOdds, previousOdds) {
     return drops;
 }
 
-// Function to process and store race odds
+// Function to process and store race odds at specific timing points
 async function updateRaceOdds(race) {
     const raceId = race.id;
     const currentTime = moment().tz('Australia/Melbourne');
     const raceTime = moment.unix(race.time);
     const minutesUntilRace = raceTime.diff(currentTime, 'minutes');
+    const secondsUntilRace = raceTime.diff(currentTime, 'seconds');
 
-    // Only track races that are 1-5 minutes away
-    if (minutesUntilRace < 1 || minutesUntilRace > 5) {
+    // Only track races that are within 3 minutes of starting
+    if (minutesUntilRace > 3 || minutesUntilRace < 0) {
         return;
     }
 
-    console.log(`📊 Updating odds for race ${raceId} (${minutesUntilRace}m until start)`);
+    console.log(`📊 Checking race ${raceId} (${minutesUntilRace}m ${secondsUntilRace % 60}s until start)`);
 
     const oddsData = await getRaceOdds(raceId);
     if (!oddsData) return;
@@ -410,36 +412,51 @@ async function updateRaceOdds(race) {
         });
     }
 
-    // Get previous odds for comparison
-    const raceHistory = oddsHistory.get(raceId) || [];
-    const previousOdds = raceHistory.length > 0 ? raceHistory[raceHistory.length - 1].odds : null;
+    // Capture odds at 2 minutes before race (within 10 second window)
+    if (minutesUntilRace <= 2 && minutesUntilRace > 1.8 && !twoMinuteOdds.has(raceId)) {
+        console.log(`📸 Capturing 2-minute odds for race ${raceId}`);
+        twoMinuteOdds.set(raceId, {
+            odds: { ...currentOdds },
+            timestamp: currentTime.toISOString(),
+            minutesUntilRace: minutesUntilRace
+        });
+    }
 
-    // Detect odds drops
-    if (previousOdds && minutesUntilRace <= 3) {
-        const drops = detectOddsDrops(raceId, currentOdds, previousOdds);
+    // Check for odds drops at 10 seconds before race (within 20 second window for reliability)
+    if (secondsUntilRace <= 30 && secondsUntilRace > 5) {
+        const twoMinuteData = twoMinuteOdds.get(raceId);
         
-        if (drops.length > 0) {
-            await sendOddsDropAlert(race, drops);
+        if (twoMinuteData) {
+            console.log(`🔍 Checking for odds drops between 2-minute and 10-second marks for race ${raceId}`);
+            const drops = detectPreciseOddsDrops(raceId, currentOdds, twoMinuteData.odds);
+            
+            if (drops.length > 0) {
+                await sendPreciseOddsDropAlert(race, drops, twoMinuteData.timestamp);
+            }
+        } else {
+            console.log(`⚠️ No 2-minute odds data found for race ${raceId} - cannot compare`);
         }
     }
 
-    // Store current odds in history
+    // Store current odds in history for debugging/monitoring
+    const raceHistory = oddsHistory.get(raceId) || [];
     raceHistory.push({
         timestamp: currentTime.toISOString(),
         odds: currentOdds,
-        minutesUntilRace: minutesUntilRace
+        minutesUntilRace: minutesUntilRace,
+        secondsUntilRace: secondsUntilRace
     });
 
-    // Keep only last 10 entries
-    if (raceHistory.length > 10) {
+    // Keep only last 5 entries
+    if (raceHistory.length > 5) {
         raceHistory.shift();
     }
 
     oddsHistory.set(raceId, raceHistory);
 }
 
-// Function to send odds drop alerts
-async function sendOddsDropAlert(race, drops) {
+// Function to send precise odds drop alerts with detailed information
+async function sendPreciseOddsDropAlert(race, drops, twoMinuteTimestamp) {
     try {
         const channel = await client.channels.fetch(ODDS_CHANNEL_ID);
         if (!channel) {
@@ -448,31 +465,40 @@ async function sendOddsDropAlert(race, drops) {
         }
 
         const raceTime = moment.unix(race.time);
-        const minutesUntil = raceTime.diff(moment().tz('Australia/Melbourne'), 'minutes');
+        const secondsUntil = raceTime.diff(moment().tz('Australia/Melbourne'), 'seconds');
         const raceName = race.league?.name || race.home?.name || 'Unknown Race';
+        const twoMinuteTime = moment(twoMinuteTimestamp);
 
-        let alertMessage = `🚨 **ODDS DROP ALERT!** 🚨\n\n`;
+        let alertMessage = `🚨 **PRECISE ODDS DROP ALERT!** 🚨\n\n`;
         alertMessage += `🏇 **Race**: ${raceName}\n`;
-        alertMessage += `⏰ **Time**: ${raceTime.format('HH:mm')} (${minutesUntil}m away)\n\n`;
+        alertMessage += `⏰ **Race Time**: ${raceTime.format('HH:mm')} (${secondsUntil}s away)\n`;
+        alertMessage += `📊 **Analysis Period**: 2min mark (${twoMinuteTime.format('HH:mm:ss')}) → 10sec mark\n\n`;
         alertMessage += `📉 **Significant Odds Drops (20%+):**\n`;
 
         drops.forEach(drop => {
-            alertMessage += `• **${drop.horseName}**: ${drop.previousOdds} → ${drop.currentOdds} (${drop.dropPercentage}% drop)\n`;
+            alertMessage += `• **${drop.horseName}**\n`;
+            alertMessage += `  └ ${drop.twoMinuteOdds} → ${drop.tenSecondOdds} (**${drop.dropPercentage}% drop**)\n`;
         });
 
-        alertMessage += `\n🎯 These horses have significant market movement!`;
+        alertMessage += `\n🎯 **${drops.length} horse${drops.length > 1 ? 's have' : ' has'} significant late market movement!**`;
+        alertMessage += `\n⚡ **Heavy betting action detected in final minutes!**`;
 
         // Create unique key to prevent duplicate alerts
-        const alertKey = `${race.id}-${drops.map(d => d.horseName).join('-')}`;
+        const alertKey = `${race.id}-precise-${drops.map(d => d.horseName).join('-')}`;
         
         if (!oddsAlertsChannelSent.has(alertKey)) {
             await channel.send(alertMessage);
             oddsAlertsChannelSent.add(alertKey);
-            console.log(`🔔 Sent odds drop alert for ${drops.length} horses in race ${race.id}`);
+            console.log(`🔔 Sent precise odds drop alert for ${drops.length} horses in race ${race.id}`);
+            
+            // Log details for debugging
+            drops.forEach(drop => {
+                console.log(`   ${drop.horseName}: ${drop.twoMinuteOdds} → ${drop.tenSecondOdds} (${drop.dropPercentage}% drop)`);
+            });
         }
 
     } catch (error) {
-        console.error('❌ Error sending odds drop alert:', error);
+        console.error('❌ Error sending precise odds drop alert:', error);
     }
 }
 
@@ -489,9 +515,10 @@ async function monitorOddsChanges() {
         for (const race of upcomingRaces) {
             const raceTime = moment.unix(race.time);
             const minutesUntil = raceTime.diff(moment().tz('Australia/Melbourne'), 'minutes');
+            const secondsUntil = raceTime.diff(moment().tz('Australia/Melbourne'), 'seconds');
             
-            // Only monitor races 1-5 minutes away
-            if (minutesUntil >= 1 && minutesUntil <= 5) {
+            // Monitor races within 3 minutes of starting
+            if (minutesUntil >= 0 && minutesUntil <= 3) {
                 await updateRaceOdds(race);
                 
                 // Small delay between API calls to avoid rate limiting
@@ -499,13 +526,24 @@ async function monitorOddsChanges() {
             }
         }
 
-        // Clean up old odds history (races more than 1 hour old)
+        // Clean up old data
         const oneHourAgo = moment().subtract(1, 'hour');
+        
+        // Clean up odds history
         for (const [raceId, history] of oddsHistory.entries()) {
             const lastUpdate = moment(history[history.length - 1]?.timestamp);
             if (lastUpdate.isBefore(oneHourAgo)) {
                 oddsHistory.delete(raceId);
                 console.log(`🗑️ Cleaned up old odds data for race ${raceId}`);
+            }
+        }
+        
+        // Clean up 2-minute odds data
+        for (const [raceId, data] of twoMinuteOdds.entries()) {
+            const dataTime = moment(data.timestamp);
+            if (dataTime.isBefore(oneHourAgo)) {
+                twoMinuteOdds.delete(raceId);
+                console.log(`🗑️ Cleaned up old 2-minute odds for race ${raceId}`);
             }
         }
 
@@ -607,7 +645,7 @@ client.on('messageCreate', async (message) => {
         const hasOpenAI = openai.apiKey && openai.apiKey !== 'demo-key';
         
         await message.reply({
-            content: `🤖 **Enhanced Racing Bot with AI Analysis & Notifications**\n\n📸 **Upload racing screenshots** and I'll analyze them!\n🏇 **I can detect:**\n• Race times and countdowns\n• Horse names and odds\n• Time until races start\n• Convert times to Melbourne timezone\n\n🔔 **Notification System:**\n• Automatically monitors race times\n• Sends @everyone alerts 5 minutes before races\n• Works across channels for maximum coverage\n\n� **Odds Tracking System:**\n• Monitors Japanese horse racing tracks\n• Detects 20%+ odds drops from 3min to 20sec before races\n• Tracks: Mizusawa, Kanazawa, Kawasaki, Tokyo Keiba, Sonoda, Nagoya, Kochi, Saga\n• Alerts sent to <#${ODDS_CHANNEL_ID}>\n\n�🕐 **Current Melbourne Time:** ${melbourneTime}\n\n🤖 **AI Status:** ${hasOpenAI ? '✅ OpenAI Enabled' : '❌ Add OpenAI API key for advanced analysis'}\n📊 **BetsAPI Status:** ${BETSAPI_TOKEN ? '✅ Enabled' : '❌ Add BETSAPI_TOKEN for odds tracking'}\n\n**Commands:**\n• \`!clear\` - Remove all race notifications\n• \`!status\` - Show active notifications\n• \`!odds\` - Show odds tracking status\n\n*Just upload an image and I'll analyze it AND set up notifications!*`
+            content: `🤖 **Enhanced Racing Bot with AI Analysis & Notifications**\n\n📸 **Upload racing screenshots** and I'll analyze them!\n🏇 **I can detect:**\n• Race times and countdowns\n• Horse names and odds\n• Time until races start\n• Convert times to Melbourne timezone\n\n🔔 **Notification System:**\n• Automatically monitors race times\n• Sends @everyone alerts 5 minutes before races\n• Works across channels for maximum coverage\n\n� **Odds Tracking System:**\n• Monitors Japanese horse racing tracks\n• Detects 20%+ odds drops from 2min to 10sec before races\n• Tracks: Mizusawa, Kanazawa, Kawasaki, Tokyo Keiba, Sonoda, Nagoya, Kochi, Saga\n• Alerts sent to <#${ODDS_CHANNEL_ID}>\n\n�🕐 **Current Melbourne Time:** ${melbourneTime}\n\n🤖 **AI Status:** ${hasOpenAI ? '✅ OpenAI Enabled' : '❌ Add OpenAI API key for advanced analysis'}\n📊 **BetsAPI Status:** ${BETSAPI_TOKEN ? '✅ Enabled' : '❌ Add BETSAPI_TOKEN for odds tracking'}\n\n**Commands:**\n• \`!clear\` - Remove all race notifications\n• \`!status\` - Show active notifications\n• \`!odds\` - Show odds tracking status\n\n*Just upload an image and I'll analyze it AND set up notifications!*`
         });
         return;
     }
@@ -665,10 +703,12 @@ client.on('messageCreate', async (message) => {
             oddsText += `✅ **BetsAPI Active**\n`;
             oddsText += `🏇 **Monitoring Tracks**: ${JAPANESE_TRACKS.join(', ')}\n`;
             oddsText += `📊 **Alert Channel**: <#${ODDS_CHANNEL_ID}>\n`;
-            oddsText += `⚡ **Detection**: 20%+ odds drops from 3min to 20sec before race\n\n`;
+            oddsText += `⚡ **Detection**: 20%+ odds drops from 2min to 10sec before race\n\n`;
             
             const trackedCount = oddsHistory.size;
+            const twoMinuteCount = twoMinuteOdds.size;
             oddsText += `📊 **Currently Tracking**: ${trackedCount} races\n`;
+            oddsText += `📸 **2-Minute Odds Captured**: ${twoMinuteCount} races\n`;
             
             if (trackedCount > 0) {
                 oddsText += `\n**Active Races:**\n`;
@@ -677,12 +717,14 @@ client.on('messageCreate', async (message) => {
                     if (count >= 5) break; // Show max 5 races
                     const lastEntry = history[history.length - 1];
                     const horseCount = Object.keys(lastEntry.odds).length;
-                    oddsText += `• Race ${raceId}: ${horseCount} horses (${lastEntry.minutesUntilRace}m away)\n`;
+                    const has2MinData = twoMinuteOdds.has(raceId) ? '📸' : '⏳';
+                    oddsText += `• ${has2MinData} Race ${raceId}: ${horseCount} horses (${Math.floor(lastEntry.secondsUntilRace / 60)}m ${lastEntry.secondsUntilRace % 60}s away)\n`;
                     count++;
                 }
                 if (trackedCount > 5) {
                     oddsText += `• ... and ${trackedCount - 5} more races\n`;
                 }
+                oddsText += `\n📸 = 2-min odds captured | ⏳ = waiting for 2-min mark`;
             }
         }
         
