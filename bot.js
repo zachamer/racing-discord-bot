@@ -368,12 +368,22 @@ client.on('messageCreate', async (message) => {
         } else {
             let statusText = `📊 **Active Race Notifications (${upcomingRaces.length}):**\n\n`;
             
-            upcomingRaces.forEach((race, index) => {
+            // Sort races by time (soonest first)
+            const sortedRaces = [...upcomingRaces].sort((a, b) => {
+                return moment(a.raceTime).diff(moment(b.raceTime));
+            });
+            
+            sortedRaces.forEach((race, index) => {
                 const raceTime = moment(race.raceTime);
                 const minutesUntil = raceTime.diff(moment().tz('Australia/Melbourne'), 'minutes');
                 const alertTime = moment(race.raceTime).subtract(5, 'minutes');
                 
-                statusText += `🏇 **${race.race}** - ${raceTime.format('HH:mm')}\n`;
+                // Include race name if available and different from race identifier
+                const raceDisplay = race.raceName && race.raceName !== 'Unknown Race' && race.raceName !== race.race 
+                    ? `**${race.race}** (${race.raceName})` 
+                    : `**${race.race}**`;
+                
+                statusText += `🏇 ${raceDisplay} - ${raceTime.format('HH:mm')}\n`;
                 statusText += `   ⏰ Alert in ${Math.max(0, minutesUntil - 5)} minutes (${alertTime.format('HH:mm')})\n\n`;
             });
             
