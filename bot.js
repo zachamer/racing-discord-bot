@@ -296,33 +296,50 @@ async function getUpcomingHorseRaces() {
     try {
         console.log('🔍 Fetching upcoming horse races from BetsAPI...');
         
-        // Horse Racing is typically sport_id 2 in BetsAPI
+        // Horse Racing is sport_id 2 in BetsAPI (confirmed from documentation)
         const response = await axios.get('https://api.b365api.com/v1/bet365/upcoming', {
             params: {
-                sport_id: 2, // Horse Racing
+                sport_id: 2, // Horse Racing - verified from BetsAPI docs
                 token: BETSAPI_TOKEN
             },
-            timeout: 10000
+            timeout: 15000, // Increased timeout for reliability
+            headers: {
+                'User-Agent': 'BetsAPI-Client/1.0'
+            }
         });
 
-        if (response.data && response.data.results) {
+        if (response.data && response.data.success === 1 && response.data.results) {
             const allRaces = response.data.results;
             
-            // Filter for Japanese tracks
+            // Filter for Japanese tracks - improved matching
             const japaneseRaces = allRaces.filter(race => {
                 const raceName = race.league?.name || race.home?.name || '';
                 return JAPANESE_TRACKS.some(track => 
-                    raceName.toLowerCase().includes(track.toLowerCase())
+                    raceName.toLowerCase().includes(track.toLowerCase()) ||
+                    raceName.toLowerCase().includes(track.toLowerCase().replace(' ', ''))
                 );
             });
 
-            console.log(`🏇 Found ${japaneseRaces.length} Japanese horse races`);
+            console.log(`🏇 Found ${japaneseRaces.length} Japanese horse races out of ${allRaces.length} total races`);
+            
+            // Log sample race for debugging
+            if (japaneseRaces.length > 0) {
+                console.log(`📋 Sample race: ${japaneseRaces[0].league?.name || japaneseRaces[0].home?.name}`);
+            }
+            
             return japaneseRaces;
+        } else {
+            console.log('⚠️ BetsAPI response indicates failure or no results');
+            return [];
         }
 
         return [];
     } catch (error) {
         console.error('❌ Error fetching horse races from BetsAPI:', error.message);
+        if (error.response) {
+            console.error('📊 Response status:', error.response.status);
+            console.error('📊 Response data:', error.response.data);
+        }
         return [];
     }
 }
@@ -332,21 +349,31 @@ async function getRaceOdds(raceId) {
     if (!BETSAPI_TOKEN) return null;
 
     try {
+        // Use the correct parameter name from BetsAPI documentation
         const response = await axios.get('https://api.b365api.com/v1/bet365/event', {
             params: {
-                FI: raceId,
+                FI: raceId, // Confirmed from BetsAPI docs - this is the correct parameter
                 token: BETSAPI_TOKEN
             },
-            timeout: 10000
+            timeout: 15000, // Increased timeout
+            headers: {
+                'User-Agent': 'BetsAPI-Client/1.0'
+            }
         });
 
-        if (response.data && response.data.results) {
+        if (response.data && response.data.success === 1 && response.data.results) {
             return response.data.results;
+        } else {
+            console.log(`⚠️ No odds data available for race ${raceId}`);
+            return null;
         }
 
-        return null;
     } catch (error) {
         console.error(`❌ Error fetching odds for race ${raceId}:`, error.message);
+        if (error.response) {
+            console.error('📊 Response status:', error.response.status);
+            console.error('📊 Response data:', error.response.data);
+        }
         return null;
     }
 }
@@ -398,23 +425,65 @@ async function updateRaceOdds(race) {
     const oddsData = await getRaceOdds(raceId);
     if (!oddsData) return;
 
-    // Extract horse odds from the API response
+    // Extract horse odds from the BetsAPI response (improved parsing)
     const currentOdds = {};
-    if (oddsData.odds && Array.isArray(oddsData.odds)) {
-        oddsData.odds.forEach(market => {
-            if (market.type === 'win' || market.type === 'place') {
-                market.values?.forEach(horse => {
-                    if (horse.odds) {
-                        currentOdds[horse.name] = horse.odds;
+    
+    try {
+        // BetsAPI returns odds in various formats - handle multiple structures
+        if (oddsData.odds && Array.isArray(oddsData.odds)) {
+            oddsData.odds.forEach(market => {
+                // Look for win/place markets
+                if (market.type === 'win' || market.type === 'place' || market.name?.toLowerCase().includes('win')) {
+                    if (market.values && Array.isArray(market.values)) {
+                        market.values.forEach(horse => {
+                            if (horse.odds && horse.name) {
+                                // Parse odds - handle different formats (decimal, fractional)
+                                let oddsValue = parseFloat(horse.odds);
+                                if (isNaN(oddsValue) && typeof horse.odds === 'string') {
+                                    // Handle fractional odds (e.g., "5/2")
+                                    const fraction = horse.odds.split('/');
+                                    if (fraction.length === 2) {
+                                        oddsValue = (parseFloat(fraction[0]) / parseFloat(fraction[1])) + 1;
+                                    }
+                                }
+                                if (!isNaN(oddsValue)) {
+                                    currentOdds[horse.name] = oddsValue;
+                                }
+                            }
+                        });
+                    }
+                }
+            });
+        }
+        
+        // Alternative structure - direct horse data
+        if (Object.keys(currentOdds).length === 0 && oddsData.results) {
+            // Try alternative parsing if main structure didn't work
+            if (Array.isArray(oddsData.results)) {
+                oddsData.results.forEach(result => {
+                    if (result.horse && result.odds) {
+                        currentOdds[result.horse] = parseFloat(result.odds);
                     }
                 });
             }
-        });
+        }
+        
+        console.log(`📋 Extracted odds for ${Object.keys(currentOdds).length} horses in race ${raceId}`);
+        
+    } catch (parseError) {
+        console.error(`❌ Error parsing odds for race ${raceId}:`, parseError.message);
+        return;
+    }
+
+    // Only proceed if we have valid odds data
+    if (Object.keys(currentOdds).length === 0) {
+        console.log(`⚠️ No valid odds data found for race ${raceId}`);
+        return;
     }
 
     // Capture odds at 2 minutes before race (within 10 second window)
     if (minutesUntilRace <= 2 && minutesUntilRace > 1.8 && !twoMinuteOdds.has(raceId)) {
-        console.log(`📸 Capturing 2-minute odds for race ${raceId}`);
+        console.log(`📸 Capturing 2-minute odds for race ${raceId} (${Object.keys(currentOdds).length} horses)`);
         twoMinuteOdds.set(raceId, {
             odds: { ...currentOdds },
             timestamp: currentTime.toISOString(),
@@ -432,6 +501,8 @@ async function updateRaceOdds(race) {
             
             if (drops.length > 0) {
                 await sendPreciseOddsDropAlert(race, drops, twoMinuteData.timestamp);
+            } else {
+                console.log(`📊 No significant odds drops detected for race ${raceId}`);
             }
         } else {
             console.log(`⚠️ No 2-minute odds data found for race ${raceId} - cannot compare`);
@@ -444,7 +515,8 @@ async function updateRaceOdds(race) {
         timestamp: currentTime.toISOString(),
         odds: currentOdds,
         minutesUntilRace: minutesUntilRace,
-        secondsUntilRace: secondsUntilRace
+        secondsUntilRace: secondsUntilRace,
+        horseCount: Object.keys(currentOdds).length
     });
 
     // Keep only last 5 entries
@@ -645,7 +717,7 @@ client.on('messageCreate', async (message) => {
         const hasOpenAI = openai.apiKey && openai.apiKey !== 'demo-key';
         
         await message.reply({
-            content: `🤖 **Enhanced Racing Bot with AI Analysis & Notifications**\n\n📸 **Upload racing screenshots** and I'll analyze them!\n🏇 **I can detect:**\n• Race times and countdowns\n• Horse names and odds\n• Time until races start\n• Convert times to Melbourne timezone\n\n🔔 **Notification System:**\n• Automatically monitors race times\n• Sends @everyone alerts 5 minutes before races\n• Works across channels for maximum coverage\n\n� **Odds Tracking System:**\n• Monitors Japanese horse racing tracks\n• Detects 20%+ odds drops from 2min to 10sec before races\n• Tracks: Mizusawa, Kanazawa, Kawasaki, Tokyo Keiba, Sonoda, Nagoya, Kochi, Saga\n• Alerts sent to <#${ODDS_CHANNEL_ID}>\n\n�🕐 **Current Melbourne Time:** ${melbourneTime}\n\n🤖 **AI Status:** ${hasOpenAI ? '✅ OpenAI Enabled' : '❌ Add OpenAI API key for advanced analysis'}\n📊 **BetsAPI Status:** ${BETSAPI_TOKEN ? '✅ Enabled' : '❌ Add BETSAPI_TOKEN for odds tracking'}\n\n**Commands:**\n• \`!clear\` - Remove all race notifications\n• \`!status\` - Show active notifications\n• \`!odds\` - Show odds tracking status\n\n*Just upload an image and I'll analyze it AND set up notifications!*`
+            content: `🤖 **Enhanced Racing Bot with AI Analysis & Notifications**\n\n📸 **Upload racing screenshots** and I'll analyze them!\n🏇 **I can detect:**\n• Race times and countdowns\n• Horse names and odds\n• Time until races start\n• Convert times to Melbourne timezone\n\n🔔 **Notification System:**\n• Automatically monitors race times\n• Sends @everyone alerts 5 minutes before races\n• Works across channels for maximum coverage\n\n� **Odds Tracking System:**\n• Monitors Japanese horse racing tracks\n• Detects 20%+ odds drops from 2min to 10sec before races\n• Tracks: Mizusawa, Kanazawa, Kawasaki, Tokyo Keiba, Sonoda, Nagoya, Kochi, Saga\n• Alerts sent to <#${ODDS_CHANNEL_ID}>\n• **Cost**: $150/month or $1/day trial (BetsAPI)\n\n�🕐 **Current Melbourne Time:** ${melbourneTime}\n\n🤖 **AI Status:** ${hasOpenAI ? '✅ OpenAI Enabled' : '❌ Add OpenAI API key for advanced analysis'}\n📊 **BetsAPI Status:** ${BETSAPI_TOKEN ? '✅ Enabled (Live bet365 odds)' : '❌ Add BETSAPI_TOKEN for odds tracking'}\n\n**Commands:**\n• \`!clear\` - Remove all race notifications\n• \`!status\` - Show active notifications\n• \`!odds\` - Show odds tracking status\n\n*Just upload an image and I'll analyze it AND set up notifications!*`
         });
         return;
     }
@@ -698,9 +770,11 @@ client.on('messageCreate', async (message) => {
         let oddsText = `📈 **Odds Tracking Status**\n\n`;
         
         if (!BETSAPI_TOKEN) {
-            oddsText += `❌ **BetsAPI not configured**\nAdd BETSAPI_TOKEN to .env file to enable odds tracking`;
+            oddsText += `❌ **BetsAPI not configured**\nAdd BETSAPI_TOKEN to .env file to enable odds tracking\n\n`;
+            oddsText += `💰 **Pricing**: $150/month (full) or $1/day (trial)\n`;
+            oddsText += `🔗 **Website**: https://betsapi.com/mm/pricing_table`;
         } else {
-            oddsText += `✅ **BetsAPI Active**\n`;
+            oddsText += `✅ **BetsAPI Active** (Rate limit: 3,600 req/hour)\n`;
             oddsText += `🏇 **Monitoring Tracks**: ${JAPANESE_TRACKS.join(', ')}\n`;
             oddsText += `📊 **Alert Channel**: <#${ODDS_CHANNEL_ID}>\n`;
             oddsText += `⚡ **Detection**: 20%+ odds drops from 2min to 10sec before race\n\n`;
@@ -711,20 +785,24 @@ client.on('messageCreate', async (message) => {
             oddsText += `📸 **2-Minute Odds Captured**: ${twoMinuteCount} races\n`;
             
             if (trackedCount > 0) {
-                oddsText += `\n**Active Races:**\n`;
+                oddsText += `\n**Recent Activity:**\n`;
                 let count = 0;
                 for (const [raceId, history] of oddsHistory.entries()) {
                     if (count >= 5) break; // Show max 5 races
                     const lastEntry = history[history.length - 1];
-                    const horseCount = Object.keys(lastEntry.odds).length;
+                    const horseCount = lastEntry.horseCount || 0;
                     const has2MinData = twoMinuteOdds.has(raceId) ? '📸' : '⏳';
-                    oddsText += `• ${has2MinData} Race ${raceId}: ${horseCount} horses (${Math.floor(lastEntry.secondsUntilRace / 60)}m ${lastEntry.secondsUntilRace % 60}s away)\n`;
+                    const timeLeft = Math.floor(lastEntry.secondsUntilRace / 60);
+                    const secsLeft = lastEntry.secondsUntilRace % 60;
+                    oddsText += `• ${has2MinData} Race ${raceId}: ${horseCount} horses (${timeLeft}m ${secsLeft}s away)\n`;
                     count++;
                 }
                 if (trackedCount > 5) {
                     oddsText += `• ... and ${trackedCount - 5} more races\n`;
                 }
                 oddsText += `\n📸 = 2-min odds captured | ⏳ = waiting for 2-min mark`;
+            } else {
+                oddsText += `\n🔍 **No active races** - waiting for Japanese tracks within 3 minutes`;
             }
         }
         
