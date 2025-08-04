@@ -13,6 +13,7 @@ const openai = new OpenAI({
 // Initialize BetsAPI
 const BETSAPI_TOKEN = process.env.BETSAPI_TOKEN;
 const ODDS_CHANNEL_ID = '1401917437921722398'; // Channel for odds drop alerts
+const RACE_ALERTS_CHANNEL_ID = '1401527867447443456'; // Channel for 5-minute race alerts
 
 // Create Discord client
 const client = new Client({
@@ -60,19 +61,22 @@ async function analyzeRacingImageWithAI(imageUrl) {
                             type: "text",
                             text: `Analyze this racing screenshot and extract:
 1. Race times (look for times like 3:30 PM, 15:30, etc.) - CONVERT ALL TIMES TO MELBOURNE TIMEZONE
-2. SPECIFIC race names or track information (e.g. "Maiden Handicap", "Group 1 Stakes", "Listed Stakes", "Class 2 Handicap", track names like "Flemington", "Randwick", etc.)
+2. SPECIFIC race names or track information - FOCUS ON JAPANESE TRACKS: Mizusawa, Kanazawa, Kawasaki, Tokyo Keiba, Sonoda, Nagoya, Kochi, Saga
 3. Horse names and odds
 4. Any countdown timers or "time to race" information - CALCULATE FROM MELBOURNE CURRENT TIME
 5. Current time shown in the image - NOTE THE TIMEZONE
 6. Look for race class/grade information (Class 1, Class 2, Group races, etc.)
 7. Look for race conditions (Maiden, Handicap, Allowance, etc.)
 
-IMPORTANT: Always calculate race times and countdowns relative to Melbourne timezone (AEDT/AEST).
-If the screenshot shows a different timezone, convert everything to Melbourne time.
-Focus on identifying when races are scheduled and calculate time remaining from current Melbourne time.
-Look closely for specific race titles, conditions, or track names that identify each race uniquely.
-If you see bet365 or other betting site interfaces, extract all visible race information including specific race names.
-Return the information in a structured format with as much detail as possible about each race's name/type.`
+IMPORTANT: 
+- Always calculate race times and countdowns relative to Melbourne timezone (AEDT/AEST)
+- ONLY extract races from Japanese tracks: Mizusawa, Kanazawa, Kawasaki, Tokyo Keiba, Sonoda, Nagoya, Kochi, Saga
+- If the screenshot shows a different timezone, convert everything to Melbourne time
+- Focus on identifying when races are scheduled and calculate time remaining from current Melbourne time
+- Look closely for specific race titles, conditions, or track names that identify each race uniquely
+- If you see bet365 or other betting site interfaces, extract all visible race information including specific race names
+- Return the information in a structured format with as much detail as possible about each race's name/type
+- IGNORE races from non-Japanese tracks or tracks not in our monitored list`
                         },
                         {
                             type: "image_url",
@@ -183,6 +187,22 @@ function addRacesToNotifications(raceInfo) {
     const races = raceInfo.races || raceInfo.raceTimes || [];
     
     races.forEach(race => {
+        // Check if race is from a Japanese track we monitor
+        const raceName = race.raceName || race.original || race.time || 'Unknown Race';
+        const raceIdentifier = race.race || '';
+        
+        const isJapaneseTrack = JAPANESE_TRACKS.some(track => 
+            raceName.toLowerCase().includes(track.toLowerCase()) ||
+            raceIdentifier.toLowerCase().includes(track.toLowerCase()) ||
+            raceName.toLowerCase().includes(track.toLowerCase().replace(' ', ''))
+        );
+        
+        if (!isJapaneseTrack) {
+            console.log(`⚠️ Skipping race ${race.race} - not from monitored Japanese tracks: ${raceName}`);
+            return; // Skip races not from our target Japanese tracks
+        }
+        
+        console.log(`✅ Adding Japanese track race: ${race.race} from ${raceName}`);
         // Always start with current Melbourne time for calculations
         const raceTime = moment().tz('Australia/Melbourne');
         
@@ -386,8 +406,12 @@ function detectPreciseOddsDrops(raceId, currentOdds, twoMinuteOddsData) {
 
     // Compare each horse's odds from 2-minute mark to current (10-second mark)
     Object.keys(currentOdds).forEach(horseName => {
-        const currentOdd = parseFloat(currentOdds[horseName]);
-        const twoMinuteOdd = parseFloat(twoMinuteOddsData[horseName]);
+        const currentHorseData = currentOdds[horseName];
+        const twoMinuteHorseData = twoMinuteOddsData[horseName];
+
+        // Handle both new object structure and old direct odds structure
+        const currentOdd = typeof currentHorseData === 'object' ? currentHorseData.odds : parseFloat(currentHorseData);
+        const twoMinuteOdd = typeof twoMinuteHorseData === 'object' ? twoMinuteHorseData.odds : parseFloat(twoMinuteHorseData);
 
         if (twoMinuteOdd && currentOdd && twoMinuteOdd > currentOdd) {
             const dropPercentage = ((twoMinuteOdd - currentOdd) / twoMinuteOdd) * 100;
@@ -395,6 +419,7 @@ function detectPreciseOddsDrops(raceId, currentOdds, twoMinuteOddsData) {
             if (dropPercentage >= 20) {
                 drops.push({
                     horseName: horseName,
+                    horseNumber: typeof currentHorseData === 'object' ? currentHorseData.number : null,
                     twoMinuteOdds: twoMinuteOdd,
                     tenSecondOdds: currentOdd,
                     dropPercentage: Math.round(dropPercentage * 10) / 10,
@@ -447,7 +472,23 @@ async function updateRaceOdds(race) {
                                     }
                                 }
                                 if (!isNaN(oddsValue)) {
-                                    currentOdds[horse.name] = oddsValue;
+                                    // Store both name and number - use horse.id or horse.number if available
+                                    const horseKey = horse.name;
+                                    let horseNumber = horse.id || horse.number || horse.barrier || null;
+                                    
+                                    // Try to extract number from horse name if not provided (e.g., "1. Lightning Strike" or "#3 Thunder Bolt")
+                                    if (!horseNumber && horse.name) {
+                                        const numberMatch = horse.name.match(/^(\d+)\.?\s+/) || horse.name.match(/#(\d+)\s+/) || horse.name.match(/\((\d+)\)/);
+                                        if (numberMatch) {
+                                            horseNumber = parseInt(numberMatch[1]);
+                                        }
+                                    }
+                                    
+                                    currentOdds[horseKey] = {
+                                        odds: oddsValue,
+                                        name: horse.name,
+                                        number: horseNumber
+                                    };
                                 }
                             }
                         });
@@ -462,7 +503,22 @@ async function updateRaceOdds(race) {
             if (Array.isArray(oddsData.results)) {
                 oddsData.results.forEach(result => {
                     if (result.horse && result.odds) {
-                        currentOdds[result.horse] = parseFloat(result.odds);
+                        const horseKey = result.horse;
+                        let horseNumber = result.id || result.number || result.barrier || null;
+                        
+                        // Try to extract number from horse name if not provided
+                        if (!horseNumber && result.horse) {
+                            const numberMatch = result.horse.match(/^(\d+)\.?\s+/) || result.horse.match(/#(\d+)\s+/) || result.horse.match(/\((\d+)\)/);
+                            if (numberMatch) {
+                                horseNumber = parseInt(numberMatch[1]);
+                            }
+                        }
+                        
+                        currentOdds[horseKey] = {
+                            odds: parseFloat(result.odds),
+                            name: result.horse,
+                            number: horseNumber
+                        };
                     }
                 });
             }
@@ -548,7 +604,13 @@ async function sendPreciseOddsDropAlert(race, drops, twoMinuteTimestamp) {
         alertMessage += `📉 **Significant Odds Drops (20%+):**\n`;
 
         drops.forEach(drop => {
-            alertMessage += `• **${drop.horseName}**\n`;
+            // Format horse display with prominent number
+            let horseDisplay = `**${drop.horseName}**`;
+            if (drop.horseNumber) {
+                horseDisplay = `**🏇 #${drop.horseNumber} - ${drop.horseName}**`;
+            }
+            
+            alertMessage += `• ${horseDisplay}\n`;
             alertMessage += `  └ ${drop.twoMinuteOdds} → ${drop.tenSecondOdds} (**${drop.dropPercentage}% drop**)\n`;
         });
 
@@ -565,7 +627,8 @@ async function sendPreciseOddsDropAlert(race, drops, twoMinuteTimestamp) {
             
             // Log details for debugging
             drops.forEach(drop => {
-                console.log(`   ${drop.horseName}: ${drop.twoMinuteOdds} → ${drop.tenSecondOdds} (${drop.dropPercentage}% drop)`);
+                const numberInfo = drop.horseNumber ? ` (#${drop.horseNumber})` : '';
+                console.log(`   ${drop.horseName}${numberInfo}: ${drop.twoMinuteOdds} → ${drop.tenSecondOdds} (${drop.dropPercentage}% drop)`);
             });
         }
 
@@ -633,17 +696,11 @@ async function monitorOddsChanges() {
 // Function to check for upcoming races and send notifications
 async function checkUpcomingRaces() {
     const currentTime = moment().tz('Australia/Melbourne');
-    const notificationChannel = process.env.NOTIFICATION_CHANNEL_ID;
-    
-    if (!notificationChannel) {
-        console.log('⚠️ No notification channel configured');
-        return;
-    }
     
     try {
-        const channel = await client.channels.fetch(notificationChannel);
+        const channel = await client.channels.fetch(RACE_ALERTS_CHANNEL_ID);
         if (!channel) {
-            console.log('❌ Notification channel not found');
+            console.log('❌ Race alerts channel not found');
             return;
         }
         
@@ -662,18 +719,26 @@ async function checkUpcomingRaces() {
                 continue;
             }
             
-            // Send notification 5 minutes before race
+            // Send notification 5 minutes before race with enhanced details for Japanese tracks
             if (minutesUntilRace <= 5 && minutesUntilRace > 0 && !notificationsSent.has(notificationKey)) {
                 // Include race name if available
                 const raceDisplay = race.raceName && race.raceName !== 'Unknown Race' && race.raceName !== race.race 
                     ? `**${race.race}** (${race.raceName})` 
                     : `**${race.race}**`;
                 
-                const message = `🔔 @everyone **RACE ALERT!**\n\n🏇 ${raceDisplay} starts in **${minutesUntilRace} minutes**!\n⏰ Race time: ${raceTime.format('HH:mm')} Melbourne time\n\n🎯 Get ready to place your bets!`;
+                // Enhanced alert for Japanese tracks with detailed information
+                let message = `🔔 @everyone **JAPANESE RACE ALERT!** 🚨\n\n`;
+                message += `🏇 **Race**: ${raceDisplay}\n`;
+                message += `⏰ **Race Time**: ${raceTime.format('HH:mm')} Melbourne time\n`;
+                message += `⏱️ **Starting in**: **${minutesUntilRace} minutes**\n`;
+                message += `📍 **Track**: Japanese Racing\n\n`;
+                message += `🎯 **Get ready to place your bets!**\n`;
+                message += `📊 **Odds tracking active** - monitoring for last-minute drops\n`;
+                message += `⚡ **Heavy betting action expected in final minutes**`;
                 
                 await channel.send(message);
                 notificationsSent.add(notificationKey);
-                console.log(`🔔 Sent notification for ${race.race} (${minutesUntilRace} minutes remaining)`);
+                console.log(`🔔 Sent enhanced Japanese track notification for ${race.race} (${minutesUntilRace} minutes remaining)`);
             }
         }
         
@@ -686,7 +751,7 @@ async function checkUpcomingRaces() {
 client.once('ready', () => {
     console.log(`✅ Bot is ready! Logged in as ${client.user.tag}`);
     console.log(`🕐 Current Melbourne time: ${moment().tz('Australia/Melbourne').format('YYYY-MM-DD HH:mm:ss [AEDT/AEST]')}`);
-    console.log(`🔔 Notification system active - monitoring channel: ${process.env.NOTIFICATION_CHANNEL_ID}`);
+    console.log(`🔔 Race alerts active - monitoring channel: ${RACE_ALERTS_CHANNEL_ID}`);
     console.log(`📊 Odds tracking active - monitoring channel: ${ODDS_CHANNEL_ID}`);
     
     // Set up race notification checker (every 30 seconds)
@@ -717,7 +782,7 @@ client.on('messageCreate', async (message) => {
         const hasOpenAI = openai.apiKey && openai.apiKey !== 'demo-key';
         
         await message.reply({
-            content: `🤖 **Enhanced Racing Bot with AI Analysis & Notifications**\n\n📸 **Upload racing screenshots** and I'll analyze them!\n🏇 **I can detect:**\n• Race times and countdowns\n• Horse names and odds\n• Time until races start\n• Convert times to Melbourne timezone\n\n🔔 **Notification System:**\n• Automatically monitors race times\n• Sends @everyone alerts 5 minutes before races\n• Works across channels for maximum coverage\n\n� **Odds Tracking System:**\n• Monitors Japanese horse racing tracks\n• Detects 20%+ odds drops from 2min to 10sec before races\n• Tracks: Mizusawa, Kanazawa, Kawasaki, Tokyo Keiba, Sonoda, Nagoya, Kochi, Saga\n• Alerts sent to <#${ODDS_CHANNEL_ID}>\n• **Cost**: $150/month or $1/day trial (BetsAPI)\n\n�🕐 **Current Melbourne Time:** ${melbourneTime}\n\n🤖 **AI Status:** ${hasOpenAI ? '✅ OpenAI Enabled' : '❌ Add OpenAI API key for advanced analysis'}\n📊 **BetsAPI Status:** ${BETSAPI_TOKEN ? '✅ Enabled (Live bet365 odds)' : '❌ Add BETSAPI_TOKEN for odds tracking'}\n\n**Commands:**\n• \`!clear\` - Remove all race notifications\n• \`!status\` - Show active notifications\n• \`!odds\` - Show odds tracking status\n\n*Just upload an image and I'll analyze it AND set up notifications!*`
+            content: `🤖 **Enhanced Racing Bot with AI Analysis & Notifications**\n\n📸 **Upload racing screenshots** and I'll analyze them!\n🏇 **I can detect:**\n• Race times and countdowns\n• Horse names and odds\n• Time until races start\n• Convert times to Melbourne timezone\n\n🔔 **Notification System:**\n• **ONLY monitors Japanese tracks**: Mizusawa, Kanazawa, Kawasaki, Tokyo Keiba, Sonoda, Nagoya, Kochi, Saga\n• Sends enhanced @everyone alerts 5 minutes before races to <#${RACE_ALERTS_CHANNEL_ID}>\n• Detailed race information with odds tracking status\n\n� **Odds Tracking System:**\n• Monitors Japanese horse racing tracks\n• Detects 20%+ odds drops from 2min to 10sec before races\n• Tracks: Mizusawa, Kanazawa, Kawasaki, Tokyo Keiba, Sonoda, Nagoya, Kochi, Saga\n• Alerts sent to <#${ODDS_CHANNEL_ID}>\n• **Cost**: $150/month or $1/day trial (BetsAPI)\n\n�🕐 **Current Melbourne Time:** ${melbourneTime}\n\n🤖 **AI Status:** ${hasOpenAI ? '✅ OpenAI Enabled' : '❌ Add OpenAI API key for advanced analysis'}\n📊 **BetsAPI Status:** ${BETSAPI_TOKEN ? '✅ Enabled (Live bet365 odds)' : '❌ Add BETSAPI_TOKEN for odds tracking'}\n\n**Commands:**\n• \`!clear\` - Remove all race notifications\n• \`!status\` - Show active notifications\n• \`!odds\` - Show odds tracking status\n• \`!test\` - Send sample odds drop alert to preview format\n\n*Just upload an image and I'll analyze it AND set up notifications for Japanese tracks only!*`
         });
         return;
     }
@@ -810,6 +875,44 @@ client.on('messageCreate', async (message) => {
         return;
     }
     
+    // Handle !test command to send a sample odds drop alert
+    if (message.content.toLowerCase() === '!test') {
+        try {
+            const channel = await client.channels.fetch(ODDS_CHANNEL_ID);
+            if (!channel) {
+                await message.reply('❌ Could not find the odds alert channel!');
+                return;
+            }
+
+            const currentTime = moment().tz('Australia/Melbourne');
+            
+            let testMessage = `🚨 **PRECISE ODDS DROP ALERT!** 🚨\n\n`;
+            testMessage += `🏇 **Race**: Kawasaki R5\n`;
+            testMessage += `⏰ **Race Time**: ${currentTime.add(2, 'minutes').format('HH:mm')} (25s away)\n`;
+            testMessage += `📊 **Analysis Period**: 2min mark (${currentTime.subtract(1, 'minute').format('HH:mm:ss')}) → 10sec mark\n\n`;
+            testMessage += `📉 **Significant Odds Drops (20%+):**\n`;
+            testMessage += `• **🏇 #3 - Lightning Strike**\n`;
+            testMessage += `  └ 4.50 → 3.20 (**28.9% drop**)\n`;
+            testMessage += `• **🏇 #7 - Thunder Bolt**\n`;
+            testMessage += `  └ 6.00 → 4.20 (**30.0% drop**)\n`;
+            testMessage += `• **🏇 #11 - Speed Demon**\n`;
+            testMessage += `  └ 8.50 → 5.80 (**31.8% drop**)\n\n`;
+            testMessage += `🎯 **3 horses have significant late market movement!**\n`;
+            testMessage += `⚡ **Heavy betting action detected in final minutes!**\n\n`;
+            testMessage += `*🧪 This is a TEST message to preview the alert format*`;
+
+            await channel.send(testMessage);
+            await message.reply(`✅ **Test alert sent to <#${ODDS_CHANNEL_ID}>!**\n\nCheck the channel to see how the odds drop alerts will look with horse numbers prominently displayed.`);
+            
+            console.log('🧪 Test odds drop alert sent to channel');
+            
+        } catch (error) {
+            console.error('❌ Error sending test message:', error);
+            await message.reply('❌ Failed to send test message. Check bot permissions and channel access.');
+        }
+        return;
+    }
+    
     // Check if message has attachments and is from the correct channel
     if (message.attachments.size === 0) return;
     
@@ -859,9 +962,11 @@ client.on('messageCreate', async (message) => {
                         responseText += `• ${raceLabel}${raceTime} → ${melbourneTime} (${timeDisplay})${countdownInfo}\n`;
                     });
                     
-                    responseText += `\n🔔 **Notifications set up!** I'll alert @ everyone 5 minutes before each race in <#${process.env.NOTIFICATION_CHANNEL_ID}>`;
+                    responseText += `\n🔔 **Notifications set up!** I'll alert @ everyone 5 minutes before each Japanese track race in <#${RACE_ALERTS_CHANNEL_ID}>`;
+                    responseText += `\n🏇 **Only monitoring**: Mizusawa, Kanazawa, Kawasaki, Tokyo Keiba, Sonoda, Nagoya, Kochi, Saga`;
                 } else {
-                    responseText += `⚠️ No upcoming races detected in this image.`;
+                    responseText += `⚠️ No upcoming Japanese track races detected in this image.`;
+                    responseText += `\n🏇 **Only monitoring**: Mizusawa, Kanazawa, Kawasaki, Tokyo Keiba, Sonoda, Nagoya, Kochi, Saga`;
                 }
                 
                 responseText += `\n\n⏰ **Current Melbourne Time:** ${moment().tz('Australia/Melbourne').format('YYYY-MM-DD HH:mm:ss [AEDT/AEST]')}`;
