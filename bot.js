@@ -500,6 +500,49 @@ client.on('messageCreate', async (message) => {
         return;
     }
     
+    // Debug race alerts command
+    if (message.content.toLowerCase() === '!debug') {
+        console.log('🐛 Debug command detected');
+        
+        try {
+            const races = await getJapaneseRaces();
+            const currentTime = moment().tz('Australia/Melbourne');
+            
+            let debugText = `🐛 **Debug Race Alert System**\n\n`;
+            debugText += `📊 **Found ${races.length} Japanese races**\n`;
+            debugText += `🕐 **Current Time:** ${currentTime.format('HH:mm:ss')}\n`;
+            debugText += `📝 **Notifications Sent:** ${notificationsSent.size}\n\n`;
+            
+            if (races.length > 0) {
+                debugText += `🏇 **Race Analysis:**\n`;
+                
+                races.slice(0, 5).forEach((race, i) => {
+                    const raceTime = moment.unix(race.time).tz('Australia/Melbourne');
+                    const minutesUntil = raceTime.diff(currentTime, 'minutes');
+                    const raceName = race.league?.name || race.home?.name || 'Unknown';
+                    const raceKey = 'japanese-' + race.id;
+                    const alreadySent = notificationsSent.has(raceKey);
+                    const shouldAlert = minutesUntil <= 5 && minutesUntil > 0 && !alreadySent;
+                    
+                    debugText += `${i+1}. **${raceName}** - ${raceTime.format('HH:mm')}\n`;
+                    debugText += `   └ Minutes until: ${minutesUntil}\n`;
+                    debugText += `   └ Should alert: ${shouldAlert ? '🚨 YES' : '❌ NO'}\n`;
+                    debugText += `   └ Already sent: ${alreadySent ? '✅' : '❌'}\n`;
+                    debugText += `   └ Key: ${raceKey}\n\n`;
+                });
+            }
+            
+            await message.reply({ content: debugText });
+            console.log('🐛 Debug info sent');
+            
+        } catch (error) {
+            console.error('❌ Debug failed:', error);
+            await message.reply(`❌ **Debug failed:** ${error.message}`);
+        }
+        
+        return;
+    }
+    
     // Check if message has attachments
     if (message.attachments.size === 0) return;
     
