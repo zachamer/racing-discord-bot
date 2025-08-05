@@ -629,6 +629,65 @@ client.on('messageCreate', async (message) => {
         return;
     }
     
+    // Test baseline capture command
+    if (message.content.toLowerCase() === '!testbaseline') {
+        console.log('🧪 Test baseline capture command detected');
+        
+        try {
+            const races = await getJapaneseRaces();
+            
+            if (races.length === 0) {
+                await message.reply('❌ **No Japanese races found to test baseline capture**');
+                return;
+            }
+            
+            const testRace = races[0]; // Use first race
+            const raceName = testRace.league?.name || testRace.home?.name || 'Unknown';
+            const raceTime = moment.unix(testRace.time).tz('Australia/Melbourne');
+            const minutesUntil = raceTime.diff(moment().tz('Australia/Melbourne'), 'minutes');
+            const raceKey = testRace.id;
+            
+            await message.reply(`🧪 **Testing Baseline Capture**\n\nTesting race: **${raceName}**\nRace time: ${raceTime.format('HH:mm')}\nMinutes until: ${minutesUntil}\nRace ID: ${raceKey}\n\nCapturing baseline odds...`);
+            
+            const odds = await fetchRaceOdds(testRace.id);
+            
+            if (odds && odds.length > 0) {
+                // Manually store baseline for testing
+                twoMinuteOdds.set(raceKey, {
+                    odds: odds,
+                    timestamp: moment().tz('Australia/Melbourne').toISOString(),
+                    race: testRace
+                });
+                
+                let oddsText = `✅ **Baseline capture successful!**\n\nStored baseline for ${raceName} with ${odds.length} horses:\n\n`;
+                
+                odds.slice(0, 5).forEach((horse, i) => {
+                    const horseName = horse.na || `Horse ${i+1}`;
+                    const horseOdds = horse.od || 'N/A';
+                    oddsText += `${i+1}. **${horseName}** - ${horseOdds}\n`;
+                });
+                
+                if (odds.length > 5) {
+                    oddsText += `\n... and ${odds.length - 5} more horses`;
+                }
+                
+                oddsText += `\n\n✅ **Baseline stored! Ready for comparison alerts.**`;
+                oddsText += `\n📊 **Total baselines stored:** ${twoMinuteOdds.size}`;
+                
+                await message.reply(oddsText);
+                
+            } else {
+                await message.reply(`❌ **No odds found for ${raceName}**\n\nThis could be because:\n• Race hasn't opened for betting yet\n• Race has finished\n• API access issue\n• Race ID not valid for odds endpoint`);
+            }
+            
+        } catch (error) {
+            console.error('❌ Test baseline failed:', error);
+            await message.reply(`❌ **Test baseline failed:** ${error.message}`);
+        }
+        
+        return;
+    }
+    
     // Check if message has attachments
     if (message.attachments.size === 0) return;
     
@@ -942,7 +1001,7 @@ async function monitorOddsChanges() {
             const raceName = race.league?.name || race.home?.name || 'Unknown';
             
             // Debug logging for timing
-            if (secondsUntilRace >= -300 && secondsUntilRace <= 300) { // Only log races within 5 minutes either side
+            if (secondsUntilRace >= -1800 && secondsUntilRace <= 7200) { // Log races within 30 minutes past to 2 hours future
                 console.log(`🕒 ${raceName} (${raceKey}): ${secondsUntilRace}s until race (${minutesUntilRace}m)`);
             }
             
