@@ -155,19 +155,6 @@ async function checkUpcomingRaces() {
             
             console.log(`🏇 ${raceName} - ${raceTime.format('HH:mm')} - ${minutesUntilRace}m until race`);
             
-            // Send notification when Japanese race is 10 minutes away (for debugging)
-            const raceKey10min = `japanese-${race.id}-10min`;
-            if (minutesUntilRace <= 10 && minutesUntilRace > 5 && !notificationsSent.has(raceKey10min)) {
-                console.log(`🚨 Sending 10-minute notification for Japanese race: ${raceName}`);
-                
-                await notificationChannel.send({
-                    content: `@everyone 🏇 **10-Minute Race Alert!**\n\n⚠️ **${raceName} starts in ${minutesUntilRace} minutes!**\n\n⏰ **Start Time:** ${raceTime.format('HH:mm:ss')} Melbourne Time\n🇯🇵 **Track:** ${raceName}\n📊 **Early warning for preparation**\n\n🔔 **5-minute alert will follow!** 🎯`
-                });
-                
-                notificationsSent.add(raceKey10min);
-                console.log(`✅ 10-minute alert sent for ${raceName}!`);
-            }
-            
             // Send notification when Japanese race is 5 minutes away
             if (minutesUntilRace <= 5 && minutesUntilRace > 0 && !notificationsSent.has(raceKey)) {
                 console.log(`🚨 Sending 5-minute notification for Japanese race: ${raceName}`);
@@ -179,17 +166,13 @@ async function checkUpcomingRaces() {
                 notificationsSent.add(raceKey);
                 console.log(`✅ 5-minute alert sent for ${raceName}!`);
             } else if (minutesUntilRace <= 5 && minutesUntilRace > 0) {
-                console.log(`⏭️  5-minute alert already sent for ${raceName} (key: ${raceKey})`);
-            } else if (minutesUntilRace <= 10 && minutesUntilRace > 5) {
-                console.log(`⏭️  10-minute alert already sent for ${raceName} (key: ${raceKey10min})`);
+                console.log(`⏭️  Alert already sent for ${raceName} (key: ${raceKey})`);
             }
             
             // Clean up old Japanese race notifications (more than 10 minutes past)
             if (minutesUntilRace < -10) {
-                const raceKey10min = `japanese-${race.id}-10min`;
                 notificationsSent.delete(raceKey);
-                notificationsSent.delete(raceKey10min);
-                console.log(`🧹 Cleaned up old notifications for ${raceName}`);
+                console.log(`🧹 Cleaned up old notification for ${raceName}`);
             }
         }
         
@@ -538,19 +521,14 @@ client.on('messageCreate', async (message) => {
                     const minutesUntil = raceTime.diff(currentTime, 'minutes');
                     const raceName = race.league?.name || race.home?.name || 'Unknown';
                     const raceKey = 'japanese-' + race.id;
-                    const raceKey10min = 'japanese-' + race.id + '-10min';
-                    const alreadySent5min = notificationsSent.has(raceKey);
-                    const alreadySent10min = notificationsSent.has(raceKey10min);
-                    const shouldAlert10min = minutesUntil <= 10 && minutesUntil > 5 && !alreadySent10min;
-                    const shouldAlert5min = minutesUntil <= 5 && minutesUntil > 0 && !alreadySent5min;
+                    const alreadySent = notificationsSent.has(raceKey);
+                    const shouldAlert = minutesUntil <= 5 && minutesUntil > 0 && !alreadySent;
                     
                     debugText += `${i+1}. **${raceName}** - ${raceTime.format('HH:mm')}\n`;
                     debugText += `   └ Minutes until: ${minutesUntil}\n`;
-                    debugText += `   └ Should alert 10min: ${shouldAlert10min ? '🚨 YES' : '❌ NO'}\n`;
-                    debugText += `   └ Should alert 5min: ${shouldAlert5min ? '🚨 YES' : '❌ NO'}\n`;
-                    debugText += `   └ 10min sent: ${alreadySent10min ? '✅' : '❌'}\n`;
-                    debugText += `   └ 5min sent: ${alreadySent5min ? '✅' : '❌'}\n`;
-                    debugText += `   └ Keys: ${raceKey10min}, ${raceKey}\n\n`;
+                    debugText += `   └ Should alert: ${shouldAlert ? '🚨 YES' : '❌ NO'}\n`;
+                    debugText += `   └ Already sent: ${alreadySent ? '✅' : '❌'}\n`;
+                    debugText += `   └ Key: ${raceKey}\n\n`;
                 });
             }
             
