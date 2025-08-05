@@ -106,6 +106,8 @@ Return the information in a structured format.`
 // Function to check for upcoming races and send notifications
 async function checkUpcomingRaces() {
     const currentTime = moment().tz('Australia/Melbourne');
+    console.log(`🔍 Checking for 5-minute race alerts at ${currentTime.format('HH:mm:ss')}`);
+    
     const notificationChannel = client.channels.cache.get('1401527867447443456');
     
     if (!notificationChannel) {
@@ -143,12 +145,15 @@ async function checkUpcomingRaces() {
     // Check Japanese races from BetsAPI for 5-minute alerts
     try {
         const japaneseRaces = await getJapaneseRaces();
+        console.log(`📊 Checking ${japaneseRaces.length} Japanese races for 5-minute alerts`);
         
         for (const race of japaneseRaces) {
             const raceTime = moment.unix(race.time).tz('Australia/Melbourne');
             const minutesUntilRace = raceTime.diff(currentTime, 'minutes');
             const raceKey = `japanese-${race.id}`;
             const raceName = race.league?.name || race.home?.name || 'Unknown Track';
+            
+            console.log(`🏇 ${raceName} - ${raceTime.format('HH:mm')} - ${minutesUntilRace}m until race`);
             
             // Send notification when Japanese race is 5 minutes away
             if (minutesUntilRace <= 5 && minutesUntilRace > 0 && !notificationsSent.has(raceKey)) {
@@ -159,11 +164,15 @@ async function checkUpcomingRaces() {
                 });
                 
                 notificationsSent.add(raceKey);
+                console.log(`✅ 5-minute alert sent for ${raceName}!`);
+            } else if (minutesUntilRace <= 5 && minutesUntilRace > 0) {
+                console.log(`⏭️  Alert already sent for ${raceName} (key: ${raceKey})`);
             }
             
             // Clean up old Japanese race notifications (more than 10 minutes past)
             if (minutesUntilRace < -10) {
                 notificationsSent.delete(raceKey);
+                console.log(`🧹 Cleaned up old notification for ${raceName}`);
             }
         }
         
