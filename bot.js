@@ -581,6 +581,54 @@ client.on('messageCreate', async (message) => {
         return;
     }
     
+    // Test odds fetch command
+    if (message.content.toLowerCase() === '!testodds') {
+        console.log('🧪 Test odds fetch command detected');
+        
+        try {
+            const races = await getJapaneseRaces();
+            
+            if (races.length === 0) {
+                await message.reply('❌ **No Japanese races found to test odds fetching**');
+                return;
+            }
+            
+            const testRace = races[0]; // Use first race
+            const raceName = testRace.league?.name || testRace.home?.name || 'Unknown';
+            const raceTime = moment.unix(testRace.time).tz('Australia/Melbourne');
+            const minutesUntil = raceTime.diff(moment().tz('Australia/Melbourne'), 'minutes');
+            
+            await message.reply(`🧪 **Testing Odds Fetch**\n\nTesting race: **${raceName}**\nRace time: ${raceTime.format('HH:mm')}\nMinutes until: ${minutesUntil}\n\nFetching odds...`);
+            
+            const odds = await fetchRaceOdds(testRace.id);
+            
+            if (odds && odds.length > 0) {
+                let oddsText = `✅ **Odds fetch successful!**\n\nFound ${odds.length} horses:\n\n`;
+                
+                odds.slice(0, 5).forEach((horse, i) => {
+                    const horseName = horse.na || `Horse ${i+1}`;
+                    const horseOdds = horse.od || 'N/A';
+                    oddsText += `${i+1}. **${horseName}** - ${horseOdds}\n`;
+                });
+                
+                if (odds.length > 5) {
+                    oddsText += `\n... and ${odds.length - 5} more horses`;
+                }
+                
+                await message.reply(oddsText);
+                
+            } else {
+                await message.reply(`❌ **No odds found for ${raceName}**\n\nThis could be because:\n• Race hasn't opened for betting\n• Race has finished\n• API access issue`);
+            }
+            
+        } catch (error) {
+            console.error('❌ Test odds failed:', error);
+            await message.reply(`❌ **Test odds failed:** ${error.message}`);
+        }
+        
+        return;
+    }
+    
     // Check if message has attachments
     if (message.attachments.size === 0) return;
     
@@ -722,6 +770,7 @@ async function getJapaneseRaces() {
 // Function to get odds for a specific Bet365 race
 async function fetchRaceOdds(raceId) {
     if (!BETSAPI_TOKEN) {
+        console.log('❌ No BetsAPI token - skipping odds fetch');
         return null;
     }
 
@@ -732,7 +781,8 @@ async function fetchRaceOdds(raceId) {
             params: {
                 token: BETSAPI_TOKEN,
                 FI: raceId // Use the race ID as FI parameter
-            }
+            },
+            timeout: 10000 // 10 second timeout
         });
 
         if (response.data && response.data.results && response.data.results.length > 0) {
@@ -748,22 +798,31 @@ async function fetchRaceOdds(raceId) {
             );
             
             if (winMarket && winMarket.odds) {
-                console.log(`🏆 Found win market with ${winMarket.odds.length} horses`);
+                console.log(`🏆 Found WIN market with ${winMarket.odds.length} horses for race ${raceId}`);
                 return winMarket.odds;
             } else {
                 // If no specific win market, return the first market with odds
                 const firstMarketWithOdds = response.data.results.find(market => market.odds && market.odds.length > 0);
                 if (firstMarketWithOdds) {
-                    console.log(`📊 Using first available market with ${firstMarketWithOdds.odds.length} horses`);
+                    console.log(`📊 Using first available market with ${firstMarketWithOdds.odds.length} horses for race ${raceId}`);
                     return firstMarketWithOdds.odds;
+                } else {
+                    console.log(`❌ No markets with odds found for race ${raceId}`);
                 }
             }
+        } else {
+            console.log(`❌ No betting data returned for race ${raceId}`);
         }
         
-        console.log(`⚠️ No odds found for race ${raceId}`);
         return null;
     } catch (error) {
-        console.error(`❌ Error fetching Bet365 odds for race ${raceId}:`, error.message);
+        if (error.response?.status === 404) {
+            console.log(`⚠️ Race ${raceId} not found (404) - may have finished or been cancelled`);
+        } else if (error.response?.status === 403) {
+            console.log(`🔒 Access denied (403) for race ${raceId} - check BetsAPI permissions`);
+        } else {
+            console.error(`❌ Error fetching Bet365 odds for race ${raceId}:`, error.message);
+        }
         return null;
     }
 }
@@ -873,15 +932,23 @@ async function monitorOddsChanges() {
         const races = await getJapaneseRaces();
         const currentTime = moment().tz('Australia/Melbourne');
         
+        console.log(`💰 Odds monitor: Checking ${races.length} Japanese races`);
+        
         for (const race of races) {
             const raceTime = moment.unix(race.time);
             const secondsUntilRace = raceTime.diff(currentTime, 'seconds');
             const minutesUntilRace = Math.floor(secondsUntilRace / 60);
             const raceKey = race.id; // Use ID as the unique identifier for Bet365
+            const raceName = race.league?.name || race.home?.name || 'Unknown';
             
-            // Store 2-minute baseline odds
-            if (secondsUntilRace <= 125 && secondsUntilRace >= 115 && !twoMinuteOdds.has(raceKey)) {
-                console.log(`📊 Capturing 2-minute baseline odds for race ${race.league?.name || race.home?.name} (ID: ${raceKey})`);
+            // Debug logging for timing
+            if (secondsUntilRace >= -300 && secondsUntilRace <= 300) { // Only log races within 5 minutes either side
+                console.log(`🕒 ${raceName} (${raceKey}): ${secondsUntilRace}s until race (${minutesUntilRace}m)`);
+            }
+            
+            // Store 2-minute baseline odds (expanded window: 90-150 seconds = 1.5-2.5 minutes)
+            if (secondsUntilRace <= 150 && secondsUntilRace >= 90 && !twoMinuteOdds.has(raceKey)) {
+                console.log(`📊 CAPTURING 2-minute baseline odds for ${raceName} (ID: ${raceKey}) - ${secondsUntilRace}s before race`);
                 const odds = await fetchRaceOdds(raceKey);
                 if (odds && odds.length > 0) {
                     twoMinuteOdds.set(raceKey, {
@@ -889,46 +956,61 @@ async function monitorOddsChanges() {
                         timestamp: currentTime.toISOString(),
                         race: race
                     });
-                    console.log(`✅ Stored 2-minute baseline for race ${raceKey} with ${odds.length} horses`);
+                    console.log(`✅ STORED 2-minute baseline for ${raceName} with ${odds.length} horses`);
+                } else {
+                    console.log(`❌ No odds found for ${raceName} baseline capture`);
                 }
             }
             
-            // Check for pre-race odds drops (10 seconds before)
-            if (secondsUntilRace <= 15 && secondsUntilRace >= 5 && twoMinuteOdds.has(raceKey)) {
-                console.log(`🔍 Checking for pre-race odds drops for race ${raceKey}`);
+            // Check for pre-race odds drops (5-25 seconds before race = expanded window)
+            if (secondsUntilRace <= 25 && secondsUntilRace >= 5 && twoMinuteOdds.has(raceKey)) {
+                console.log(`🔍 CHECKING pre-race odds drops for ${raceName} (${secondsUntilRace}s before race)`);
                 const currentOdds = await fetchRaceOdds(raceKey);
                 const baseline = twoMinuteOdds.get(raceKey);
                 
                 if (currentOdds && baseline) {
+                    console.log(`📊 Comparing ${baseline.odds.length} baseline vs ${currentOdds.length} current odds`);
                     const drops = compareOddsForDrops(baseline.odds, currentOdds, 20);
                     if (drops.length > 0) {
-                        console.log(`🚨 Found ${drops.length} horses with 20%+ odds drops!`);
+                        console.log(`🚨 FOUND ${drops.length} horses with 20%+ odds drops! Sending alert...`);
                         await sendPreRaceOddsDropAlert(race, drops, baseline.timestamp);
+                    } else {
+                        console.log(`📈 No significant pre-race odds drops found for ${raceName}`);
                     }
+                } else {
+                    console.log(`❌ Could not fetch current odds for ${raceName} pre-race check`);
                 }
             }
             
-            // Check for post-race odds changes (15 seconds after race starts)
-            if (secondsUntilRace <= -10 && secondsUntilRace >= -20 && twoMinuteOdds.has(raceKey)) {
-                console.log(`🔍 Checking for post-race odds changes for race ${raceKey}`);
+            // Check for post-race odds changes (5-30 seconds after race starts = expanded window)
+            if (secondsUntilRace <= -5 && secondsUntilRace >= -30 && twoMinuteOdds.has(raceKey)) {
+                console.log(`🔍 CHECKING post-race odds changes for ${raceName} (${Math.abs(secondsUntilRace)}s after race start)`);
                 const currentOdds = await fetchRaceOdds(raceKey);
                 const baseline = twoMinuteOdds.get(raceKey);
                 
                 if (currentOdds && baseline) {
+                    console.log(`📊 Comparing ${baseline.odds.length} baseline vs ${currentOdds.length} current odds (post-race)`);
                     const changes = compareOddsForDrops(baseline.odds, currentOdds, 20);
                     if (changes.length > 0) {
-                        console.log(`🏃 Found ${changes.length} horses with 20%+ odds changes during race!`);
+                        console.log(`🏃 FOUND ${changes.length} horses with 20%+ odds changes during race! Sending alert...`);
                         await sendPostRaceOddsChangeAlert(race, changes, baseline.timestamp, Math.abs(secondsUntilRace));
+                    } else {
+                        console.log(`📊 No significant post-race odds changes found for ${raceName}`);
                     }
+                } else {
+                    console.log(`❌ Could not fetch current odds for ${raceName} post-race check`);
                 }
             }
             
             // Clean up old race data (more than 30 minutes past)
             if (secondsUntilRace < -1800) {
                 twoMinuteOdds.delete(raceKey);
-                console.log(`🧹 Cleaned up old race data for ${raceKey}`);
+                console.log(`🧹 Cleaned up old race data for ${raceName} (${raceKey})`);
             }
         }
+        
+        // Summary logging
+        console.log(`💰 Odds monitor complete: ${twoMinuteOdds.size} races with baseline odds stored`);
         
     } catch (error) {
         console.error('❌ Error in odds monitoring:', error);
