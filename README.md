@@ -1,58 +1,63 @@
-# Simple Discord Racing Bot
+# 🏇 Racing Discord Bot with AI Analysis & Notifications
 
-A simple Discord bot that analyzes racing screenshots and sends notifications.
+A powerful Discord bot that analyzes racing screenshots from bet365 and sends automated notifications before races start.
 
-## Setup
+## ✨ Features
 
-1. **Install dependencies:**
-   ```
-   npm install
-   ```
+- **AI-Powered Analysis**: Uses OpenAI Vision API to analyze racing screenshots
+- **Melbourne Timezone**: Automatically converts all times to Melbourne (AEDT/AEST)
+- **Smart Notifications**: Sends @everyone alerts 5 minutes before races start
+- **Multi-Format Support**: Handles various countdown formats (seconds, minutes)
+- **Cross-Channel**: Works across multiple Discord channels
 
-2. **Create a Discord bot:**
-   - Go to https://discord.com/developers/applications
-   - Create a new application
-   - Go to "Bot" section
-   - Copy the token
+## 🚀 Quick Start
 
-3. **Configure environment:**
-   - Create a `.env` file with: `DISCORD_TOKEN=your_discord_bot_token_here`
+1. Upload racing screenshots to Discord
+2. Bot automatically analyzes and extracts race data
+3. Notifications sent 5 minutes before each race starts
 
-4. **Invite bot to your server:**
-   - Go to OAuth2 > URL Generator
-   - Select "bot" scope
-   - Select "Send Messages", "Read Message History", "Add Reactions" permissions
-   - Use the generated URL to invite bot
+## 🛠️ Environment Variables
 
-5. **Run the bot:**
-   ```
-   npm start
-   ```
+Create a `.env` file with:
 
-## How it works
+```env
+DISCORD_TOKEN=your_discord_bot_token
+OPENAI_API_KEY=your_openai_api_key
+CHANNEL_ID=your_monitoring_channel_id
+NOTIFICATION_CHANNEL_ID=your_notification_channel_id
+```
 
-- Upload any image to a Discord channel where the bot has access
-- The bot will analyze the image using OCR (Optical Character Recognition)
-- If racing-related content is detected, it will send a notification
-- Use `!help` command for more information
+## 📝 Commands
 
-## Features
+- `!help` - Show bot features and status
+- Upload any racing image - Automatic analysis
 
-- 🏇 Detects racing screenshots automatically
-- 📝 Extracts text from images using OCR
-- 🔔 Sends notifications when racing content is found
-- ⚡ Simple and lightweight
+## 🔧 Local Development
 
-*This is a basic implementation that you can enhance further.*
+```bash
+npm install
+npm start
+```
 
-- Read Messages
-- Send Messages
-- Read Message History
-- Attach Files
-- Use External Emojis
+## 🌐 Deploy to Railway
 
-## Commands
+1. Fork this repository
+2. Connect to Railway
+3. Add environment variables
+4. Deploy automatically
 
-- `!races` - Show today's parsed races
-- `!stats` - Show bot statistics
-- `!help` - Show available commands
+## 📊 Race Analysis
+
+The bot can detect:
+- Race numbers (R1, R2, etc.)
+- Countdown timers (58s, 30m formats)
+- Race start times
+- Convert to Melbourne timezone
+- Set up automatic notifications
+
+## 🔔 Notification System
+
+- Monitors races every 30 seconds
+- Sends alerts 5 minutes before start
+- Prevents duplicate notifications
+- Automatic cleanup of old races
