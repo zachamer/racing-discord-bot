@@ -331,8 +331,103 @@ client.on('messageCreate', async (message) => {
         const hasOpenAI = openai.apiKey && openai.apiKey !== 'demo-key';
         
         await message.reply({
-            content: `🤖 **Enhanced Racing Bot with AI Analysis & Notifications**\n\n📸 **Upload racing screenshots** and I'll analyze them!\n🏇 **I can detect:**\n• Race times and countdowns\n• Horse names and odds\n• Time until races start\n• Convert times to Melbourne timezone\n\n� **Notification System:**\n• Automatically monitors race times\n• Sends @everyone alerts 5 minutes before races\n• Works across channels for maximum coverage\n\n�🕐 **Current Melbourne Time:** ${melbourneTime}\n\n🤖 **AI Status:** ${hasOpenAI ? '✅ OpenAI Enabled' : '❌ Add OpenAI API key for advanced analysis'}\n\n*Just upload an image and I'll analyze it AND set up notifications!*`
+            content: `🤖 **Enhanced Racing Bot with AI Analysis & Notifications**\n\n📸 **Upload racing screenshots** and I'll analyze them!\n🏇 **I can detect:**\n• Race times and countdowns\n• Horse names and odds\n• Time until races start\n• Convert times to Melbourne timezone\n\n🔔 **Notification System:**\n• Automatically monitors race times\n• Sends @everyone alerts 5 minutes before races\n• Works across channels for maximum coverage\n\n� **Commands:**\n• \`!help\` - Show this help message\n• \`!races\` - Show current Japanese races being monitored\n• \`!status\` - Show bot status and configuration\n\n�🕐 **Current Melbourne Time:** ${melbourneTime}\n\n🤖 **AI Status:** ${hasOpenAI ? '✅ OpenAI Enabled' : '❌ Add OpenAI API key for advanced analysis'}\n\n*Just upload an image and I'll analyze it AND set up notifications!*`
         });
+        return;
+    }
+    
+    // Show current Japanese races command
+    if (message.content.toLowerCase() === '!races') {
+        console.log('🏇 Races command detected');
+        
+        try {
+            const races = await getJapaneseRaces();
+            const currentTime = moment().tz('Australia/Melbourne');
+            
+            if (races.length === 0) {
+                await message.reply({
+                    content: `🏇 **No Japanese Races Found**\n\n❌ No Japanese horse races are currently available from Bet365.\n\n🕐 **Current Melbourne Time:** ${currentTime.format('YYYY-MM-DD HH:mm:ss [AEDT/AEST]')}\n\n*The bot monitors these tracks: Morioka, Kanazawa, Kawasaki, Tokyo Keiba, Sonoda, Nagoya, Kochi, Saga, Mizusawa*`
+                });
+                return;
+            }
+            
+            let responseText = `🏇 **Current Japanese Races Being Monitored**\n\n`;
+            responseText += `📊 **Found ${races.length} Japanese races from Bet365:**\n\n`;
+            
+            // Group races by track
+            const trackGroups = {};
+            races.forEach(race => {
+                const trackName = race.league?.name || race.home?.name || 'Unknown';
+                if (!trackGroups[trackName]) {
+                    trackGroups[trackName] = [];
+                }
+                trackGroups[trackName].push(race);
+            });
+            
+            // Display races grouped by track
+            Object.keys(trackGroups).forEach(trackName => {
+                const trackRaces = trackGroups[trackName];
+                responseText += `🏁 **${trackName}** (${trackRaces.length} races)\n`;
+                
+                trackRaces.forEach(race => {
+                    const raceTime = moment.unix(race.time).tz('Australia/Melbourne');
+                    const minutesUntil = raceTime.diff(currentTime, 'minutes');
+                    const timeStatus = minutesUntil > 0 ? `${minutesUntil}m away` : 'Started';
+                    
+                    responseText += `  • ${raceTime.format('HH:mm')} (${timeStatus})\n`;
+                });
+                responseText += `\n`;
+            });
+            
+            responseText += `🕐 **Current Melbourne Time:** ${currentTime.format('HH:mm:ss AEDT/AEST')}\n`;
+            responseText += `🔄 **Next update:** Every 15 seconds\n`;
+            responseText += `🚨 **Alerts:** 2min baseline → 10s before & 15s after race start`;
+            
+            await message.reply({ content: responseText });
+            
+        } catch (error) {
+            console.error('❌ Error fetching races:', error);
+            await message.reply({
+                content: `❌ **Error fetching Japanese races**\n\nThere was an issue connecting to the Bet365 API. Please try again later.\n\n🕐 **Current Melbourne Time:** ${moment().tz('Australia/Melbourne').format('YYYY-MM-DD HH:mm:ss [AEDT/AEST]')}`
+            });
+        }
+        
+        return;
+    }
+    
+    // Show bot status command
+    if (message.content.toLowerCase() === '!status') {
+        console.log('🔧 Status command detected');
+        
+        const currentTime = moment().tz('Australia/Melbourne');
+        const hasOpenAI = openai.apiKey && openai.apiKey !== 'demo-key';
+        const hasBetsAPI = !!BETSAPI_TOKEN;
+        
+        let statusText = `🤖 **Bot Status Report**\n\n`;
+        statusText += `🕐 **Current Time:** ${currentTime.format('YYYY-MM-DD HH:mm:ss [AEDT/AEST]')}\n`;
+        statusText += `🔑 **API Status:**\n`;
+        statusText += `  • Discord: ✅ Connected as ${client.user.tag}\n`;
+        statusText += `  • OpenAI: ${hasOpenAI ? '✅ Connected' : '❌ Not configured'}\n`;
+        statusText += `  • BetsAPI: ${hasBetsAPI ? '✅ Connected' : '❌ Not configured'}\n\n`;
+        
+        statusText += `🏇 **Racing Monitoring:**\n`;
+        statusText += `  • Notification alerts: Every 30 seconds\n`;
+        statusText += `  • Odds monitoring: Every 15 seconds\n`;
+        statusText += `  • Upcoming races tracked: ${upcomingRaces.length}\n`;
+        statusText += `  • 2-minute baselines stored: ${twoMinuteOdds.size}\n\n`;
+        
+        statusText += `📡 **Channels:**\n`;
+        statusText += `  • Odds alerts: <#${ODDS_CHANNEL_ID}>\n`;
+        statusText += `  • Race notifications: <#${RACE_ALERTS_CHANNEL_ID}>\n\n`;
+        
+        statusText += `📋 **Commands:**\n`;
+        statusText += `  • \`!help\` - Show help information\n`;
+        statusText += `  • \`!races\` - Show current Japanese races\n`;
+        statusText += `  • \`!status\` - Show this status report\n\n`;
+        
+        statusText += `🚀 **Bot is running on Railway deployment**`;
+        
+        await message.reply({ content: statusText });
         return;
     }
     
