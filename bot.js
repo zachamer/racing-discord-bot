@@ -106,7 +106,7 @@ Return the information in a structured format.`
 // Function to check for upcoming races and send notifications
 async function checkUpcomingRaces() {
     const currentTime = moment().tz('Australia/Melbourne');
-    console.log(`🔍 Checking for 5-minute race alerts at ${currentTime.format('HH:mm:ss')}`);
+    console.log(`🔍 Checking for race alerts at ${currentTime.format('HH:mm:ss')}`);
     
     const notificationChannel = client.channels.cache.get('1401527867447443456');
     
@@ -142,40 +142,53 @@ async function checkUpcomingRaces() {
         }
     }
     
-    // Check Japanese races from BetsAPI for 5-minute alerts
+    // Check Japanese races from BetsAPI for alerts
     try {
         const japaneseRaces = await getJapaneseRaces();
-        console.log(`📊 Checking ${japaneseRaces.length} Japanese races for 5-minute alerts`);
+        console.log(`📊 Checking ${japaneseRaces.length} Japanese races for alerts`);
         
         for (const race of japaneseRaces) {
             const raceTime = moment.unix(race.time).tz('Australia/Melbourne');
             const minutesUntilRace = raceTime.diff(currentTime, 'minutes');
-            const raceKey = `japanese-${race.id}`;
             const raceName = race.league?.name || race.home?.name || 'Unknown Track';
+            const raceKey = `jp-${race.id}`;
             
-            console.log(`🏇 ${raceName} - ${raceTime.format('HH:mm')} - ${minutesUntilRace}m until race`);
+            console.log(`🏇 ${raceName} at ${raceTime.format('HH:mm')} - ${minutesUntilRace} minutes until race`);
             
-            // Send notification when Japanese race is 5 minutes away
-            if (minutesUntilRace <= 5 && minutesUntilRace > 0 && !notificationsSent.has(raceKey)) {
-                console.log(`🚨 Sending 5-minute notification for Japanese race: ${raceName}`);
+            // Check if we should send a 5-minute alert
+            const shouldSend5MinAlert = (minutesUntilRace >= 4 && minutesUntilRace <= 6);
+            const hasNotified = notificationsSent.has(raceKey);
+            
+            console.log(`   Debug: minutesUntilRace=${minutesUntilRace}, shouldSend=${shouldSend5MinAlert}, hasNotified=${hasNotified}`);
+            
+            if (shouldSend5MinAlert && !hasNotified) {
+                console.log(`🚨 SENDING 5-minute alert for ${raceName}!`);
                 
-                await notificationChannel.send({
-                    content: `@everyone 🏇 **Japanese Race Alert!**\n\n🚨 **${raceName} starts in ${minutesUntilRace} minutes!**\n\n⏰ **Start Time:** ${raceTime.format('HH:mm:ss')} Melbourne Time\n🇯🇵 **Track:** ${raceName}\n📊 **Odds monitoring active**\n\nGet ready for live odds tracking! 🎯`
-                });
-                
-                notificationsSent.add(raceKey);
-                console.log(`✅ 5-minute alert sent for ${raceName}!`);
-            } else if (minutesUntilRace <= 5 && minutesUntilRace > 0) {
-                console.log(`⏭️  Alert already sent for ${raceName} (key: ${raceKey})`);
+                try {
+                    await notificationChannel.send({
+                        content: `@everyone 🏇 **Japanese Race Alert!**\n\n🚨 **${raceName} starts in ${minutesUntilRace} minutes!**\n\n⏰ **Start Time:** ${raceTime.format('HH:mm:ss')} Melbourne Time\n🇯🇵 **Track:** ${raceName}\n📊 **Odds monitoring active**\n\nGet ready for live odds tracking! 🎯`
+                    });
+                    
+                    notificationsSent.add(raceKey);
+                    console.log(`✅ Successfully sent 5-minute alert for ${raceName}!`);
+                    
+                } catch (sendError) {
+                    console.error(`❌ Failed to send notification for ${raceName}:`, sendError);
+                }
+            } else {
+                if (hasNotified) {
+                    console.log(`   ⏭️ Already notified for ${raceName}`);
+                } else if (minutesUntilRace > 6) {
+                    console.log(`   ⏰ Too early for ${raceName} (${minutesUntilRace} minutes)`);
+                } else if (minutesUntilRace < 4) {
+                    console.log(`   ⏱️ Too late for ${raceName} (${minutesUntilRace} minutes)`);
+                }
             }
             
-            // Clean up old Japanese race notifications (more than 10 minutes past)
+            // Clean up old notifications
             if (minutesUntilRace < -10) {
-                // Clean up both old 5-minute and any leftover 10-minute notification keys
-                const raceKey10min = `japanese-${race.id}-10min`;
                 notificationsSent.delete(raceKey);
-                notificationsSent.delete(raceKey10min);
-                console.log(`🧹 Cleaned up old notifications for ${raceName}`);
+                console.log(`🧹 Cleaned up notification for ${raceName}`);
             }
         }
         
@@ -350,6 +363,7 @@ client.once('ready', () => {
     // Set up race notification checker (every 30 seconds)
     setInterval(checkUpcomingRaces, 30000);
     console.log(`⏰ Race notification checker started (every 30 seconds)`);
+    console.log(`🚨 5-minute alerts: Range 4-6 minutes before race`);
     
     // Set up odds monitoring (every 15 seconds for more precise timing)
     if (BETSAPI_TOKEN) {
@@ -525,13 +539,13 @@ client.on('messageCreate', async (message) => {
                     const raceTime = moment.unix(race.time).tz('Australia/Melbourne');
                     const minutesUntil = raceTime.diff(currentTime, 'minutes');
                     const raceName = race.league?.name || race.home?.name || 'Unknown';
-                    const raceKey = 'japanese-' + race.id;
+                    const raceKey = `jp-${race.id}`;
                     const alreadySent = notificationsSent.has(raceKey);
-                    const shouldAlert = minutesUntil <= 5 && minutesUntil > 0 && !alreadySent;
+                    const shouldAlert = (minutesUntil >= 4 && minutesUntil <= 6) && !alreadySent;
                     
                     debugText += `${i+1}. **${raceName}** - ${raceTime.format('HH:mm')}\n`;
                     debugText += `   └ Minutes until: ${minutesUntil}\n`;
-                    debugText += `   └ Should alert: ${shouldAlert ? '🚨 YES' : '❌ NO'}\n`;
+                    debugText += `   └ Should alert (4-6min): ${shouldAlert ? '🚨 YES' : '❌ NO'}\n`;
                     debugText += `   └ Already sent: ${alreadySent ? '✅' : '❌'}\n`;
                     debugText += `   └ Key: ${raceKey}\n\n`;
                 });
