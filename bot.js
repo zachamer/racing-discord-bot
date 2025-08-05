@@ -540,7 +540,7 @@ async function getJapaneseRaces() {
         console.log('🔍 Fetching Bet365 horse racing events...');
         
         // Use the working Bet365 endpoint
-        const response = await axios.get('https://api.betsapi.com/v1/bet365/upcoming', {
+        const response = await axios.get('https://api.betsapi.com/v2/bet365/upcoming', {
             params: {
                 token: BETSAPI_TOKEN,
                 sport_id: 2 // Horse Racing
