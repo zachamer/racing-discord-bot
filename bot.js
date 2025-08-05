@@ -454,7 +454,8 @@ client.on('messageCreate', async (message) => {
         statusText += `  • Notification alerts: Every 30 seconds\n`;
         statusText += `  • Odds monitoring: Every 15 seconds\n`;
         statusText += `  • Upcoming races tracked: ${upcomingRaces.length}\n`;
-        statusText += `  • 2-minute baselines stored: ${twoMinuteOdds.size}\n\n`;
+        statusText += `  • 2-minute baselines stored: ${twoMinuteOdds.size}\n`;
+        statusText += `  • Notifications sent: ${notificationsSent.size}\n\n`;
         
         statusText += `📡 **Channels:**\n`;
         statusText += `  • Odds alerts: <#${ODDS_CHANNEL_ID}>\n`;
@@ -463,11 +464,39 @@ client.on('messageCreate', async (message) => {
         statusText += `📋 **Commands:**\n`;
         statusText += `  • \`!help\` - Show help information\n`;
         statusText += `  • \`!races\` - Show current Japanese races\n`;
-        statusText += `  • \`!status\` - Show this status report\n\n`;
+        statusText += `  • \`!status\` - Show this status report\n`;
+        statusText += `  • \`!test\` - Test notification channel\n\n`;
         
         statusText += `🚀 **Bot is running on Railway deployment**`;
         
         await message.reply({ content: statusText });
+        return;
+    }
+    
+    // Test notification command
+    if (message.content.toLowerCase() === '!test') {
+        console.log('🧪 Test command detected');
+        
+        try {
+            const notificationChannel = client.channels.cache.get('1401527867447443456');
+            
+            if (!notificationChannel) {
+                await message.reply('❌ **Notification channel not found!** Bot cannot access channel 1401527867447443456');
+                return;
+            }
+            
+            await notificationChannel.send({
+                content: `🧪 **Test Alert** 🧪\n\nThis is a test notification to verify the alert system is working.\n\n⏰ **Time:** ${moment().tz('Australia/Melbourne').format('HH:mm:ss')} Melbourne Time\n🤖 **Sent by:** ${message.author.username}\n\n✅ **If you see this, 5-minute race alerts should work!**`
+            });
+            
+            await message.reply('✅ **Test notification sent!** Check channel <#1401527867447443456>');
+            console.log('✅ Test notification sent successfully');
+            
+        } catch (error) {
+            console.error('❌ Test notification failed:', error);
+            await message.reply(`❌ **Test failed:** ${error.message}`);
+        }
+        
         return;
     }
     
