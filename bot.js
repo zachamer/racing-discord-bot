@@ -113,7 +113,7 @@ async function checkUpcomingRaces() {
         return;
     }
     
-    // Check each upcoming race
+    // Check screenshot-based races
     for (const race of upcomingRaces) {
         const raceTime = moment(race.raceTime);
         const minutesUntilRace = raceTime.diff(currentTime, 'minutes');
@@ -138,6 +138,37 @@ async function checkUpcomingRaces() {
                 notificationsSent.delete(raceKey);
             }
         }
+    }
+    
+    // Check Japanese races from BetsAPI for 5-minute alerts
+    try {
+        const japaneseRaces = await getJapaneseRaces();
+        
+        for (const race of japaneseRaces) {
+            const raceTime = moment.unix(race.time).tz('Australia/Melbourne');
+            const minutesUntilRace = raceTime.diff(currentTime, 'minutes');
+            const raceKey = `japanese-${race.id}`;
+            const raceName = race.league?.name || race.home?.name || 'Unknown Track';
+            
+            // Send notification when Japanese race is 5 minutes away
+            if (minutesUntilRace <= 5 && minutesUntilRace > 0 && !notificationsSent.has(raceKey)) {
+                console.log(`🚨 Sending 5-minute notification for Japanese race: ${raceName}`);
+                
+                await notificationChannel.send({
+                    content: `@everyone 🏇 **Japanese Race Alert!**\n\n🚨 **${raceName} starts in ${minutesUntilRace} minutes!**\n\n⏰ **Start Time:** ${raceTime.format('HH:mm:ss')} Melbourne Time\n🇯🇵 **Track:** ${raceName}\n📊 **Odds monitoring active**\n\nGet ready for live odds tracking! 🎯`
+                });
+                
+                notificationsSent.add(raceKey);
+            }
+            
+            // Clean up old Japanese race notifications (more than 10 minutes past)
+            if (minutesUntilRace < -10) {
+                notificationsSent.delete(raceKey);
+            }
+        }
+        
+    } catch (error) {
+        console.error('❌ Error checking Japanese races for notifications:', error);
     }
 }
 
