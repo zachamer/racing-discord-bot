@@ -171,8 +171,11 @@ async function checkUpcomingRaces() {
             
             // Clean up old Japanese race notifications (more than 10 minutes past)
             if (minutesUntilRace < -10) {
+                // Clean up both old 5-minute and any leftover 10-minute notification keys
+                const raceKey10min = `japanese-${race.id}-10min`;
                 notificationsSent.delete(raceKey);
-                console.log(`🧹 Cleaned up old notification for ${raceName}`);
+                notificationsSent.delete(raceKey10min);
+                console.log(`🧹 Cleaned up old notifications for ${raceName}`);
             }
         }
         
@@ -465,7 +468,9 @@ client.on('messageCreate', async (message) => {
         statusText += `  • \`!help\` - Show help information\n`;
         statusText += `  • \`!races\` - Show current Japanese races\n`;
         statusText += `  • \`!status\` - Show this status report\n`;
-        statusText += `  • \`!test\` - Test notification channel\n\n`;
+        statusText += `  • \`!test\` - Test notification channel\n`;
+        statusText += `  • \`!debug\` - Debug race alert system\n`;
+        statusText += `  • \`!clear\` - Clear notification cache\n\n`;
         
         statusText += `🚀 **Bot is running on Railway deployment**`;
         
@@ -538,6 +543,25 @@ client.on('messageCreate', async (message) => {
         } catch (error) {
             console.error('❌ Debug failed:', error);
             await message.reply(`❌ **Debug failed:** ${error.message}`);
+        }
+        
+        return;
+    }
+    
+    // Clear notification cache command
+    if (message.content.toLowerCase() === '!clear') {
+        console.log('🧹 Clear cache command detected');
+        
+        try {
+            const clearedCount = notificationsSent.size;
+            notificationsSent.clear();
+            
+            await message.reply(`🧹 **Cache Cleared!**\n\nCleared ${clearedCount} notification entries from cache.\n\n✅ **All races can now send fresh alerts!**`);
+            console.log(`✅ Cleared ${clearedCount} notification cache entries`);
+            
+        } catch (error) {
+            console.error('❌ Clear failed:', error);
+            await message.reply(`❌ **Clear failed:** ${error.message}`);
         }
         
         return;
